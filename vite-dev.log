@@ -1,0 +1,21 @@
+
+> crypto-orderflow@1.0.0 dev
+> vite --host 127.0.0.1 --port 5173
+
+
+  VITE v5.4.21  ready in 104 ms
+
+  ➜  Local:   http://127.0.0.1:5173/
+3:21:25 PM [vite] page reload src/components/FootprintChart.js
+3:23:20 PM [vite] page reload src/components/FootprintChart.js
+3:31:42 PM [vite] page reload src/components/FootprintChart.js
+3:31:42 PM [vite] page reload src/components/FootprintChart.js
+12:31:50 PM [vite] page reload src/components/FootprintChart.js
+12:34:16 PM [vite] page reload src/components/FootprintChart.js
+12:37:15 PM [vite] page reload src/components/FootprintChart.js
+12:40:27 PM [vite] page reload src/components/FootprintChart.js
+12:52:13 PM [vite] page reload src/components/FootprintChart.js
+12:55:06 PM [vite] page reload src/components/FootprintChart.js
+12:58:42 PM [vite] page reload src/components/FootprintChart.js
+1:02:06 PM [vite] page reload src/components/FootprintChart.js
+1:04:38 PM [vite] page reload src/components/FootprintChart.js

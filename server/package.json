@@ -1,0 +1,24 @@
+{
+    "name": "cryptoflow-server",
+    "version": "1.0.0",
+    "description": "CryptoFlow VPS Data Collector and API Server",
+    "main": "api.js",
+    "scripts": {
+        "start": "node api.js",
+        "collector": "node collector.js",
+        "dev": "nodemon api.js"
+    },
+    "dependencies": {
+        "better-sqlite3": "^9.2.2",
+        "compression": "^1.8.1",
+        "cors": "^2.8.5",
+        "express": "^4.18.2",
+        "ws": "^8.14.2"
+    },
+    "devDependencies": {
+        "nodemon": "^3.0.2"
+    },
+    "engines": {
+        "node": ">=18.0.0"
+    }
+}

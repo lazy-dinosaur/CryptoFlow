@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CryptoFlow Chart Engine Demo</title>
+  <link rel="stylesheet" href="/src/index.css" />
+  <style>
+    /* Keep demo isolated from app grid */
+    body { overflow: hidden; }
+    #demoRoot {
+      height: 100vh;
+      width: 100vw;
+      display: grid;
+      grid-template-rows: 44px 1fr;
+      background: #0b0f14;
+    }
+    #demoTop {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 12px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      background: rgba(10,10,10,0.6);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      font-family: Inter, system-ui, sans-serif;
+      font-size: 13px;
+      color: rgba(255,255,255,0.85);
+    }
+    #demoTop code {
+      font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      color: rgba(255,255,255,0.8);
+    }
+    #demoCanvasWrap { position: relative; }
+    #chartCanvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="demoRoot">
+    <div id="demoTop">
+      <div>
+        <strong>Chart Engine Demo</strong>
+        <span style="opacity:0.7; margin-left:8px;">(layer-based renderer)</span>
+      </div>
+      <div style="opacity:0.8; display:flex; gap:12px;">
+        <span><code>Drag</code> pan</span>
+        <span><code>Wheel</code> zoom</span>
+        <span><code>H</code> heatmap</span>
+        <span><code>D</code> delta</span>
+        <span><code>C</code> crosshair</span>
+      </div>
+    </div>
+    <div id="demoCanvasWrap">
+      <canvas id="chartCanvas"></canvas>
+    </div>
+  </div>
+
+  <script type="module" src="/src/chartEngineDemo.js"></script>
+</body>
+
+</html>

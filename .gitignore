@@ -1,0 +1,16 @@
+# Defaults
+node_modules/
+dist/
+.DS_Store
+.env
+coverage/
+npm-debug.log
+
+# Editor
+.vscode/
+.idea/
+
+# Project specific
+*.db
+*.db-journal
+*.db-wal

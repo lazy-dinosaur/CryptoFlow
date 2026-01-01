@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="de">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CryptoFlow - Order Flow Analysis</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="/src/index.css">
+</head>
+
+<body>
+  <!-- Loading Overlay -->
+  <div id="loadingOverlay" class="loading-overlay">
+    <div class="loading-spinner"></div>
+    <div class="loading-text">Connecting to Binance...</div>
+  </div>
+
+  <!-- Help Overlay -->
+  <div id="helpOverlay" class="help-overlay hidden">
+    <div class="help-modal">
+      <div class="help-header">
+        <h2>⌨️ Keyboard Shortcuts</h2>
+        <button class="help-close" id="helpClose">✕</button>
+      </div>
+      <div class="help-content">
+        <div class="shortcut-group">
+          <h3>Navigation</h3>
+          <div class="shortcut"><kbd>Drag</kbd> Pan chart</div>
+          <div class="shortcut"><kbd>Scroll</kbd> Pan horizontal</div>
+          <div class="shortcut"><kbd>Ctrl + Scroll</kbd> Zoom in/out</div>
+          <div class="shortcut"><kbd>Double-Click</kbd> Reset view</div>
+        </div>
+        <div class="shortcut-group">
+          <h3>Controls</h3>
+          <div class="shortcut"><kbd>Space</kbd> Toggle auto-scroll (LIVE/PAUSED)</div>
+          <div class="shortcut"><kbd>R</kbd> Reset view</div>
+          <div class="shortcut"><kbd>+</kbd> / <kbd>-</kbd> Zoom in / out</div>
+        </div>
+        <div class="shortcut-group">
+          <h3>Display</h3>
+          <div class="shortcut"><kbd>H</kbd> Toggle Heatmap</div>
+          <div class="shortcut"><kbd>C</kbd> Toggle Crosshair</div>
+          <div class="shortcut"><kbd>I</kbd> Toggle Imbalances</div>
+          <div class="shortcut"><kbd>D</kbd> Toggle Delta</div>
+          <div class="shortcut"><kbd>?</kbd> Show this help</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="app">
+    <!-- Header -->
+    <header class="header">
+      <div class="header-left">
+        <div class="logo">
+          <span class="logo-icon">📊</span>
+          <span class="logo-text">CryptoFlow</span>
+        </div>
+        <div class="symbol-selector">
+          <select id="symbolSelect">
+            <option value="btcusdt">BTCUSDT</option>
+            <option value="ethusdt">ETHUSDT</option>
+            <option value="solusdt">SOLUSDT</option>
+            <option value="bnbusdt">BNBUSDT</option>
+          </select>
+        </div>
+        <div class="timeframe-selector">
+          <button class="tf-btn active" data-tf="1">1m</button>
+          <button class="tf-btn" data-tf="5">5m</button>
+          <button class="tf-btn" data-tf="15">15m</button>
+          <button class="tf-btn" data-tf="60">1H</button>
+        </div>
+      </div>
+      <div class="header-right">
+        <div class="connection-status" id="connectionStatus">
+          <span class="status-dot"></span>
+          <span class="status-text">Disconnected</span>
+        </div>
+        <div class="price-display" id="priceDisplay">
+          <span class="price">--</span>
+          <span class="price-change">0.00%</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="main-content">
+      <!-- Left: Footprint Chart with Volume Profile -->
+      <section class="chart-section">
+        <div class="chart-header">
+          <h2>Footprint Chart</h2>
+          <div class="chart-controls">
+            <div class="tick-selector">
+              <label>Tick:</label>
+              <select id="tickSizeSelect">
+                <option value="5">5</option>
+                <option value="10" selected>10</option>
+                <option value="25">25</option>
+                <option value="50">50</option>
+              </select>
+            </div>
+            <button class="control-btn active" id="toggleCrosshair" title="Toggle Crosshair">
+              <span>✚</span>
+            </button>
+            <button class="control-btn active" id="toggleImbalances" title="Toggle Imbalances">
+              <span>⚖️</span>
+            </button>
+            <button class="control-btn active" id="toggleDelta" title="Toggle Delta">
+              <span>Δ</span>
+            </button>
+            <button class="control-btn" id="toggleHeatmap" title="Toggle Heatmap">
+              <span>🔥</span>
+            </button>
+            <div class="whale-slider-container" title="Heatmap Intensity Threshold">
+              <span style="font-size: 10px; margin-right: 4px;">🔥</span>
+              <input type="range" id="heatmapIntensitySlider" min="0" max="1" step="0.01" value="0.02"
+                class="wide-slider">
+              <span id="heatmapIntensityValue" class="slider-value">2%</span>
+            </div>
+            <div class="whale-slider-container" title="Heatmap History (0-100%)">
+              <span style="font-size: 10px; margin-right: 4px;">📊</span>
+              <input type="range" id="heatmapHistorySlider" min="0" max="100" step="5" value="60" class="wide-slider">
+              <span id="heatmapHistoryValue" class="slider-value">60%</span>
+            </div>
+            <button class="control-btn active" id="toggleBigTrades" title="Toggle Big Trades">
+              <span>🐋</span>
+            </button>
+            <div class="whale-slider-container">
+              <input type="range" id="whaleThresholdSlider" min="1" max="500" step="5" value="5"
+                title="Whale Threshold (BTC)" class="wide-slider">
+              <span id="whaleThresholdValue" class="slider-value">5</span>
+              <button class="small-btn" id="toggleAutoFilter" title="Auto-Adaptive Filter"
+                style="margin-left: 8px; font-size: 10px; padding: 2px 5px;">AUTO</button>
+            </div>
+            <div class="divider-vertical"
+              style="width: 1px; height: 24px; background: rgba(255,255,255,0.1); margin: 0 4px;"></div>
+
+            <button class="control-btn active" id="toggleML" title="Toggle ML Dashboard">
+              <span>🤖</span>
+            </button>
+          </div>
+        </div>
+        <div class="chart-container">
+          <div class="volume-profile-container" id="volumeProfileContainer">
+            <canvas id="volumeProfileCanvas"></canvas>
+          </div>
+          <div class="footprint-container" id="footprintContainer">
+            <canvas id="footprintCanvas"></canvas>
+            <!-- ML Dashboard overlay -->
+            <div id="mlDashboard"></div>
+          </div>
+        </div>
+        <div class="chart-legend">
+          <div class="legend-item">
+            <span class="legend-color buy"></span>
+            <span>Bid</span>
+          </div>
+          <div class="legend-item">
+            <span class="legend-color sell"></span>
+            <span>Ask</span>
+          </div>
+          <div class="legend-item">
+            <span class="legend-color imbalance-buy"></span>
+            <span>Buy Imbalance</span>
+          </div>
+          <div class="legend-item">
+            <span class="legend-color imbalance-sell"></span>
+            <span>Sell Imbalance</span>
+          </div>
+          <div class="legend-item">
+            <span class="legend-color stacked"></span>
+            <span>Stacked (3+)</span>
+          </div>
+          <div class="legend-item hint">
+            <span>Scroll = Zoom | Drag = Pan | ? = Help</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Right: Order Book -->
+      <aside class="orderbook-section">
+        <div class="orderbook-header">
+          <h2>Order Book</h2>
+          <div class="orderbook-stats">
+            <span class="bid-ratio" id="bidRatio">50%</span>
+            <span class="ratio-bar"><span id="ratioFill"></span></span>
+            <span class="ask-ratio" id="askRatio">50%</span>
+          </div>
+        </div>
+        <div class="orderbook-container" id="orderbookContainer">
+          <div class="orderbook-asks" id="orderbookAsks"></div>
+          <div class="orderbook-spread" id="orderbookSpread">
+            <span class="spread-price">--</span>
+            <span class="spread-value">Spread: --</span>
+          </div>
+          <div class="orderbook-bids" id="orderbookBids"></div>
+        </div>
+      </aside>
+    </main>
+
+    <!-- Footer Stats -->
+    <footer class="footer">
+      <div class="stat-item">
+        <span class="stat-label">24h Volume</span>
+        <span class="stat-value" id="volume24h">--</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-label">CVD</span>
+        <span class="stat-value" id="cvdValue">--</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-label">Delta</span>
+        <span class="stat-value" id="deltaValue">--</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-label">Trades/s</span>
+        <span class="stat-value" id="tradesPerSec">--</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-label">POC</span>
+        <span class="stat-value" id="pocValue">--</span>
+      </div>
+    </footer>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+
+</html>
