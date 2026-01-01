@@ -38,16 +38,23 @@ export class FootprintChart {
         this.minZoomY = 0.1;
         this.maxZoomY = 50;
         this.deltaRowHeight = 24; // Slightly taller for readability
+        this.cvdPanelHeight = 60; // New CVD Panel
 
         // Flags
         this.showHeatmap = true;
         this.showDelta = true;
+        this.showCVD = true;
+        this.showSessionProfile = true; // NEW
         this.showBigTrades = true;
         this.showCrosshair = true;
-        this.showNakedLiquidity = false;
         this.showML = true;
         this.showImbalances = true;
         this.showLens = false;
+
+        // Profile Data
+        this.sessionProfile = []; // { price, vol }
+        this.pocPrice = 0;
+        this.maxProfileVol = 0;
 
         // Heatmap controls
         this.heatmapHistoryPercent = 60;
@@ -128,6 +135,18 @@ export class FootprintChart {
     // PUBLIC API
     updateCandles(candles) {
         this.candles = candles || [];
+
+        // PRE-CALCULATE CVD
+        let runningDelta = 0;
+        for (const c of this.candles) {
+            const d = c.delta || 0;
+            runningDelta += d;
+            c.cvd = runningDelta;
+        }
+
+        // PRE-CALCULATE SESSION PROFILE
+        this._calculateSessionProfile();
+
         this.requestDraw();
     }
 
@@ -221,6 +240,43 @@ export class FootprintChart {
         return next;
     }
 
+    _calculateSessionProfile() {
+        if (!this.candles || this.candles.length === 0) {
+            this.sessionProfile = [];
+            return;
+        }
+
+        const map = new Map();
+        let maxVol = 0;
+        let poc = 0;
+
+        for (const c of this.candles) {
+            if (!c.clusters) continue;
+
+            // Handle both Map and Object formats
+            let entries = [];
+            if (c.clusters instanceof Map) entries = c.clusters.entries();
+            else entries = Object.entries(c.clusters).map(([p, d]) => [parseFloat(p), d]);
+
+            for (const [price, data] of entries) {
+                const vol = (data.bid || 0) + (data.ask || 0);
+                const current = map.get(price) || 0;
+                const next = current + vol;
+                map.set(price, next);
+
+                if (next > maxVol) {
+                    maxVol = next;
+                    poc = price;
+                }
+            }
+        }
+
+        // Convert to array for rendering
+        this.sessionProfile = Array.from(map.entries()).map(([price, vol]) => ({ price, vol }));
+        this.maxProfileVol = maxVol;
+        this.pocPrice = poc;
+    }
+
     toggleHeatmap() { this.showHeatmap = !this.showHeatmap; this.requestDraw(); return this.showHeatmap; }
     toggleBigTrades() { this.showBigTrades = !this.showBigTrades; this.requestDraw(); return this.showBigTrades; }
     toggleCrosshair() { this.showCrosshair = !this.showCrosshair; this.requestDraw(); return this.showCrosshair; }
@@ -239,7 +295,12 @@ export class FootprintChart {
     }
 
     // COORDS
-    _deltaH() { return this.showDelta ? this.deltaRowHeight : 0; }
+    _deltaH() {
+        let h = 0;
+        if (this.showDelta) h += this.deltaRowHeight;
+        if (this.showCVD) h += this.cvdPanelHeight;
+        return h;
+    }
     _getX(index) { return Math.floor((index * this.zoomX) + this.offsetX) + 0.5; }
     _getY(price) { return Math.floor(this.height - ((price / this.tickSize * this.zoomY) + this.offsetY) - this._deltaH()) + 0.5; }
     _getPriceFromY(y) { return (this.height - y - this.offsetY - this._deltaH()) / this.zoomY * this.tickSize; }
@@ -255,22 +316,95 @@ export class FootprintChart {
 
     _render() {
         if (!this.isReady || !this.ctx) return;
+
+        // SAFETY: Auto-recover from NaN state (which causes blank chart)
+        if (!Number.isFinite(this.zoomX) || this.zoomX <= 0) this.zoomX = 10;
+        if (!Number.isFinite(this.zoomY) || this.zoomY <= 0) this.zoomY = 2;
+        if (!Number.isFinite(this.offsetX)) this.offsetX = 0;
+        if (!Number.isFinite(this.offsetY)) this.offsetY = 0;
+        if (!Number.isFinite(this.cvdPanelHeight)) this.cvdPanelHeight = 60;
+
         const ctx = this.ctx;
         const { width, height } = this;
         if (width <= 0 || height <= 0) return;
 
-        ctx.fillStyle = this.colors.bg;
-        ctx.fillRect(0, 0, width, height);
+        try {
+            ctx.fillStyle = this.colors.bg;
+            ctx.fillRect(0, 0, width, height);
 
-        if (this.showHeatmap) this._drawHeatmap(ctx);
-        this._drawGrid(ctx);
-        this._drawCandles(ctx);
-        if (this.showDelta) this._drawDeltaSummary(ctx);
-        this._drawPriceLine(ctx);
-        if (this.showBigTrades) this._drawBigTrades(ctx);
-        if (this.showNakedLiquidity && !this.showLens) this._drawLiquidity(ctx);
-        if (this.showCrosshair && this.crosshairX) this._drawCrosshair(ctx);
-        if (this.showLens) this._drawLens(ctx);
+            if (this.showHeatmap) this._drawHeatmap(ctx);
+            this._drawGrid(ctx); // Grid behind profile?
+
+            // Draw Profile BEHIND candles? or On Top?
+            // Usually Profile is subtle background on the right.
+            if (this.showSessionProfile) this._drawSessionProfile(ctx);
+
+            this._drawCandles(ctx);
+
+            // Draw Bottom Panels
+            if (this.showDelta) this._drawDeltaSummary(ctx);
+            if (this.showCVD) this._drawCVD(ctx);
+
+            this._drawPriceLine(ctx);
+            if (this.showBigTrades) this._drawBigTrades(ctx);
+            if (this.showCrosshair && this.crosshairX) this._drawCrosshair(ctx);
+            if (this.showLens) this._drawLens(ctx);
+        } catch (e) {
+            console.error('Chart Render Error:', e);
+            // Fallback: Draw Error Text
+            ctx.fillStyle = 'red';
+            ctx.font = '14px sans-serif';
+            ctx.fillText('Render Error: ' + e.message, 10, 20);
+        }
+    }
+
+    _drawSessionProfile(ctx) {
+        if (!this.sessionProfile || this.sessionProfile.length === 0) return;
+
+        const { width, height, maxProfileVol, pocPrice } = this;
+        const deltaH = this._deltaH();
+        const profileWidth = 100; // Max width in pixels
+        const startX = width - profileWidth; // Right align
+
+        ctx.save();
+        ctx.globalAlpha = 0.3; // Subtle
+
+        for (const { price, vol } of this.sessionProfile) {
+            const y = this._getY(price);
+            if (y < 0 || y > height - deltaH) continue;
+
+            const barH = Math.max(1, this.zoomY); // Match candle row height
+            // Don't draw if too dense? logic check:
+            // if (this.zoomY < 0.5) ... maybe skip or generic block
+
+            const barW = (vol / maxProfileVol) * profileWidth;
+
+            // Color: POC is Yellow, others are Grey/Blue
+            if (Math.abs(price - pocPrice) < 0.0001) {
+                ctx.fillStyle = '#fbbf24'; // Amber/Gold POC
+                ctx.globalAlpha = 0.8; // PoC stands out
+            } else {
+                ctx.fillStyle = '#64748b'; // Slate 500
+                ctx.globalAlpha = 0.2;
+            }
+
+            // Draw from Right Edge
+            ctx.fillRect(width - barW, y - barH / 2, barW, barH);
+        }
+
+        // Draw POC Line extending
+        const pocY = this._getY(pocPrice);
+        if (pocY > 0 && pocY < height - deltaH) {
+            ctx.globalAlpha = 0.8;
+            ctx.strokeStyle = '#fbbf24';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(width - profileWidth, pocY);
+            ctx.lineTo(width, pocY);
+            ctx.stroke();
+        }
+
+        ctx.restore();
     }
 
     _drawHeatmap(ctx) {
@@ -574,11 +708,12 @@ export class FootprintChart {
 
     _drawDeltaSummary(ctx) {
         const { candles, zoomX, offsetX, width, height } = this;
-        const rowTop = height - this.deltaRowHeight;
+        const panelHeight = this.deltaRowHeight;
+        const rowTop = height - panelHeight - this.cvdPanelHeight; // Shift up above CVD
 
         // Darker footer background
         ctx.fillStyle = '#1a1a1a';
-        ctx.fillRect(0, rowTop, width, this.deltaRowHeight);
+        ctx.fillRect(0, rowTop, width, panelHeight);
 
         // Top Border
         ctx.strokeStyle = '#333';
@@ -605,16 +740,96 @@ export class FootprintChart {
 
             // Subtle Delta Bar
             ctx.fillStyle = isPos ? 'rgba(16, 185, 129, 0.2)' : 'rgba(239, 68, 68, 0.2)';
-            ctx.fillRect(x, rowTop + 2, candleWidth, this.deltaRowHeight - 4);
+            ctx.fillRect(x, rowTop + 2, candleWidth, panelHeight - 4);
 
             // Value
             if (zoomX > 30) {
                 ctx.fillStyle = isPos ? this.colors.candleUp : this.colors.candleDown;
-                ctx.fillText(delta.toFixed(0), centerX, height - 7);
+                ctx.fillText(delta.toFixed(0), centerX, rowTop + 15);
             } else {
                 ctx.fillStyle = isPos ? this.colors.candleUp : this.colors.candleDown;
-                ctx.fillRect(centerX - 1.5, height - 12, 3, 3);
+                ctx.fillRect(centerX - 1.5, rowTop + 10, 3, 3);
             }
+        }
+    }
+
+    _drawCVD(ctx) {
+        const { candles, width, height, zoomX, offsetX } = this;
+        const panelH = this.cvdPanelHeight;
+        const topY = height - panelH;
+
+        // Background
+        ctx.fillStyle = '#0e1012';
+        ctx.fillRect(0, topY, width, panelH);
+
+        // Border Top
+        ctx.strokeStyle = '#333';
+        ctx.beginPath();
+        ctx.moveTo(0, topY);
+        ctx.lineTo(width, topY);
+        ctx.stroke();
+
+        if (!candles || candles.length === 0) return;
+
+        // Auto-Scale CVD logic
+        // We only care about visible range min/max to scale appropriately? -> Better: Global or Loaded-Range scaling
+        // Let's use Loaded-Range for stability
+        let minCVD = Infinity, maxCVD = -Infinity;
+
+        const startIdx = Math.max(0, Math.floor(-offsetX / zoomX) - 1);
+        const endIdx = Math.min(candles.length - 1, Math.ceil((width - offsetX) / zoomX) + 1);
+
+        // Find min/max in visible area for better local contrast
+        for (let i = startIdx; i <= endIdx; i++) {
+            const val = candles[i]?.cvd;
+            if (val !== undefined) {
+                if (val < minCVD) minCVD = val;
+                if (val > maxCVD) maxCVD = val;
+            }
+        }
+
+        if (minCVD === Infinity) return; // No data
+        if (maxCVD === minCVD) { maxCVD += 100; minCVD -= 100; } // avoid div/0
+
+        const range = maxCVD - minCVD;
+        const padding = 5;
+        const plotH = panelH - (padding * 2);
+
+        // Helper to map CVD value to Y
+        const getCvdY = (val) => {
+            const norm = (val - minCVD) / range; // 0..1
+            // 0 is bottom, 1 is top. 
+            // Screen Y: TopY + padding + (1-norm)*plotH
+            return topY + padding + (1 - norm) * plotH;
+        };
+
+        // Draw Line
+        ctx.strokeStyle = '#3b82f6'; // Blue 500
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+
+        let first = true;
+        for (let i = startIdx; i <= endIdx; i++) {
+            const x = this._getX(i) + (zoomX / 2); // Center of candle
+            const val = candles[i]?.cvd;
+            if (val === undefined) continue;
+
+            const y = getCvdY(val);
+            if (first) { ctx.moveTo(x, y); first = false; }
+            else { ctx.lineTo(x, y); }
+        }
+        ctx.stroke();
+
+        // Draw Zero Line if visible? Usually CVD is huge number, so Zero is far off.
+        // Instead draw Start Line or just text label.
+
+        // Label Last Value
+        const lastCandle = candles[Math.min(candles.length - 1, endIdx)];
+        if (lastCandle && lastCandle.cvd !== undefined) {
+            const lastY = getCvdY(lastCandle.cvd);
+            ctx.fillStyle = '#3b82f6';
+            ctx.textAlign = 'right';
+            ctx.fillText(`CVD: ${lastCandle.cvd.toFixed(0)}`, width - 5, topY + 12);
         }
     }
 
@@ -830,61 +1045,7 @@ export class FootprintChart {
         }
     }
 
-    setLiquidityLevels(levels) {
-        this.nakedLiquidityLevels = Array.isArray(levels) ? levels : [];
-        this.requestDraw();
-    }
 
-    _drawLiquidity(ctx) {
-        if (!this.showNakedLiquidity) return;
-
-        const levels = this.nakedLiquidityLevels || [];
-        if (levels.length === 0) return;
-
-        const deltaH = this._deltaH();
-
-        ctx.font = '10px "Roboto Mono", monospace';
-        ctx.textBaseline = 'middle';
-
-        for (const lev of levels) {
-            if (!lev || !Number.isFinite(lev.price)) continue;
-
-            const y = this._getY(lev.price);
-            if (y < 0 || y > this.height - deltaH) continue;
-
-            const isBid = lev.type === 'bid';
-            const lineColor = isBid ? '#10b981' : '#ef4444';
-
-            // line
-            ctx.strokeStyle = lineColor;
-            ctx.lineWidth = 1;
-            ctx.setLineDash([6, 4]);
-            ctx.beginPath();
-            ctx.moveTo(0, y);
-            ctx.lineTo(this.width, y);
-            ctx.stroke();
-            ctx.setLineDash([]);
-
-            // label
-            // label
-            const vol = Number(lev.volume);
-            if (Number.isFinite(vol) && vol > 0) {
-                const text = `${isBid ? '' : ''}${vol.toFixed(2)}`; // Minimal label
-                // Subtle, small text
-                ctx.font = '9px "Roboto Mono", monospace';
-                const w = ctx.measureText(text).width + 6;
-
-                ctx.globalAlpha = 0.6; // More transparent background
-                ctx.fillStyle = '#0a0a0a';
-                ctx.fillRect(this.width - w - 4, y - 7, w, 14);
-                ctx.globalAlpha = 1;
-
-                ctx.fillStyle = lineColor;
-                ctx.textAlign = 'right';
-                ctx.fillText(text, this.width - 6, y);
-            }
-        }
-    }
 
     _drawCrosshair(ctx) {
         if (this.showLens) return;
@@ -941,7 +1102,6 @@ export class FootprintChart {
             case 'D': this.toggleDelta(); break;
             case 'I': this.toggleImbalances(); break;
             case 'L': this.showLens = !this.showLens; this.requestDraw(); break;
-            case 'X': this.showNakedLiquidity = !this.showNakedLiquidity; this.requestDraw(); break;
             case 'M': window.dispatchEvent(new CustomEvent('toggle-ml-dashboard')); break;
             case '+': case '=': this.zoomX = Math.min(this.maxZoomX, this.zoomX * 1.1); break;
             case '-': case '_': this.zoomX = Math.max(this.minZoomX, this.zoomX / 1.1); break;
