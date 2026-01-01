@@ -11,7 +11,7 @@ Save these details securely. This is where the backend lives.
 
 | Parameter | Value |
 | :--- | :--- |
-| **IP Address** | `100.86.66.124` |
+| **IP Address** | `100.86.66.124` (Exclude from Public GitHub) |
 | **OS** | Windows Server |
 | **Username** | `Administrator` |
 | **Project Path** | `C:\CryptoFlow` |

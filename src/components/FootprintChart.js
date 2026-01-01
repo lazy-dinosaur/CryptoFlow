@@ -62,7 +62,9 @@ export class FootprintChart {
         this.heatmapIntensityThreshold = 0.005; // Show more detail (was 0.02)
         this.heatmapOpacity = 0.8; // More solid/vibrant (was 0.5)
         this.maxVolumeInHistory = 10;
-        this.bigTradeThreshold = 5.0;
+        this.showBigTrades = true;
+        this.bigTradeThreshold = 20.0; // User requested 20 default
+        this.bigTradeScale = 1.0; // Visual size multiplier
         this.imbalanceThreshold = 3.0;
 
         // Interaction
@@ -181,6 +183,7 @@ export class FootprintChart {
     setTickSize(size) { this.tickSize = size; this.requestDraw(); }
     setZoom(level) { this.zoomX = level; this.requestDraw(); }
     setBigTradeThreshold(val) { this.bigTradeThreshold = val; this.requestDraw(); }
+    setBigTradeScale(val) { this.bigTradeScale = val; this.requestDraw(); } // New setter
     setHeatmapIntensityThreshold(val) { this.heatmapIntensityThreshold = val; this.requestDraw(); }
     setHeatmapHistoryPercent(val) {
         this.heatmapHistoryPercent = Math.max(0, Math.min(100, val));
@@ -616,169 +619,145 @@ export class FootprintChart {
     }
 
     _drawLens(ctx) {
-        if (!this.hoveredCandle) return;
-        const c = this.hoveredCandle;
+        if (!this.lastX || !this.lastY) return;
 
-        const lensW = 280;
-        const lensH = 320;
-        let lx = this.lastX + 20;
-        let ly = this.lastY - lensH / 2;
-        if (lx + lensW > this.width) lx = this.lastX - lensW - 20;
-        if (ly < 0) ly = 10;
-        if (ly + lensH > this.height) ly = this.height - lensH - 10;
+        const mx = this.lastX;
+        const my = this.lastY;
 
-        // Modern Lens Background
-        ctx.fillStyle = 'rgba(20, 25, 30, 0.98)';
-        ctx.fillRect(lx, ly, lensW, lensH);
+        // --- CONFIGURATION ---
+        const lensSize = 260;
+        const lensX = 20; // Fixed Left
+        const lensY = 80; // Fixed Top (below header)
 
-        // Border
-        ctx.strokeStyle = '#444';
+        // Lens Zoom Settings (minimum 85px for text)
+        const lensZoomX = Math.max(this.zoomX * 1.0, 85);
+        const lensZoomY = Math.max(this.zoomY * 1.0, 15);
+
+        // --- 1. DRAW SOURCE INDICATOR (On Main Chart) ---
+        // How big is the lens viewport in "World Units"?
+        // WidthWorld = lensSize / lensZoomX
+        // HeightWorld = lensSize / lensZoomY
+        //
+        // So on the Main Chart (current zoom), the source rect size is:
+        const srcW = (lensSize / lensZoomX) * this.zoomX;
+        const srcH = (lensSize / lensZoomY) * this.zoomY;
+
+        ctx.save();
+        ctx.strokeStyle = '#fff';
         ctx.lineWidth = 1;
-        ctx.strokeRect(lx, ly, lensW, lensH);
+        ctx.setLineDash([4, 2]);
+        ctx.shadowColor = '#000';
+        ctx.shadowBlur = 2;
+        ctx.strokeRect(mx - srcW / 2, my - srcH / 2, srcW, srcH);
 
-        // Header info
-        ctx.fillStyle = '#fff';
-        ctx.font = 'bold 12px "Roboto Mono", monospace';
-        ctx.textAlign = 'left';
+        // Crosshair center of source
+        ctx.beginPath();
+        ctx.moveTo(mx - 5, my); ctx.lineTo(mx + 5, my);
+        ctx.moveTo(mx, my - 5); ctx.lineTo(mx, my + 5);
+        ctx.stroke();
+        ctx.restore();
 
-        const d = new Date(c.time);
-        const timeStr = `${d.getHours()}:${d.getMinutes().toString().padStart(2, '0')}`;
-        // Header
-        ctx.fillStyle = '#ccc';
-        ctx.fillText(`${timeStr}`, lx + 12, ly + 22);
 
-        const delta = c.delta || 0;
-        const bull = c.close >= c.open;
-        ctx.fillStyle = delta >= 0 ? this.colors.candleUp : this.colors.candleDown;
-        ctx.textAlign = 'right';
-        ctx.fillText(`Δ ${delta.toFixed(2)}`, lx + lensW - 12, ly + 22);
+        // --- 2. PREPARE LENS RENDERING ---
+        // Logic: Map User Mouse Point (World Coords) -> Center of Lens Box (Lens Coords)
 
-        // Separator
-        ctx.strokeStyle = '#333';
-        ctx.beginPath(); ctx.moveTo(lx, ly + 35); ctx.lineTo(lx + lensW, ly + 35); ctx.stroke();
+        // World Point under mouse:
+        const worldInd = (mx - this.offsetX) / this.zoomX;
+        const priceUnits = (this.height - my - this.offsetY - this._deltaH()) / this.zoomY;
 
-        const clusters = c.clusters;
-        if (!clusters) return;
+        // Calculate Offset for Lens Context
+        // We want: worldPoint * lensZoom + newOffset = CenterOfLens
+        // So: newOffset = CenterOfLens - (worldPoint * lensZoom)
 
-        let entries = [];
-        if (clusters instanceof Map) {
-            entries = Array.from(clusters.entries());
-        } else {
-            entries = Object.entries(clusters).map(([p, data]) => [parseFloat(p), data]);
-        }
+        const lensCenterX = lensX + lensSize / 2;
+        const lensCenterY = lensY + lensSize / 2;
 
-        // Defensive: ignore malformed cluster entries
-        entries = entries.filter(([price, data]) => Number.isFinite(price) && data && typeof data === 'object');
+        const lensOffsetX = lensCenterX - (worldInd * lensZoomX);
+        const lensOffsetY = (lensCenterY - this._deltaH()) - (priceUnits * lensZoomY); // Inverse Y logic from mouse calc?
 
-        entries.sort((a, b) => b[0] - a[0]);
+        // Re-calcing OffsetY properly:
+        // ScreenY = Height - OffsetY - DeltaH - (PriceUnits * ZoomY)
+        // We want ScreenY to be lensCenterY.
+        // lensCenterY = LensHeight (which is effectively this.height in the clipped ctx?)
+        // Wait, 'this.height' is global.
+        // Let's stick to the simpler translation:
+        // LensOffsetY needs to shift the drawing so that 'worldInd' is at 'lensCenterX'
 
-        const lensRowH = 15;
-        const startY = ly + 45;
-        const centerX = lx + lensW / 2;
+        // Y-Axis is inverted in _getY: height - offsetY - ...
+        // We need: this.height - lensOffsetY - this._deltaH() - (priceUnits * lensZoomY) = lensCenterY
+        // => lensOffsetY = this.height - lensCenterY - this._deltaH() - (priceUnits * lensZoomY)
 
-        let maxVol = 0;
-        let pocIndex = 0;
-        entries.forEach((e, idx) => {
-            const v = (e[1].bid || 0) + (e[1].ask || 0);
-            if (v > maxVol) { maxVol = v; pocIndex = idx; }
-        });
+        const calcLensOffsetY = this.height - lensCenterY - this._deltaH() - (priceUnits * lensZoomY);
 
-        let startRow = Math.max(0, pocIndex - 8);
-        // Ensure we cover enough range
-        let endRow = Math.min(entries.length, startRow + 17);
 
-        let drawY = startY;
-        const candleColor = bull ? this.colors.candleUp : this.colors.candleDown;
+        // --- 3. CLIP & RENDER LENS ---
+        ctx.save();
 
-        for (let i = startRow; i < endRow; i++) {
-            const [price, data] = entries[i];
+        // Draw Lens Background (Fixed Box)
+        ctx.fillStyle = '#0e1012';
+        ctx.fillRect(lensX, lensY, lensSize, lensSize);
 
-            // --- CONTEXT: WICK & BODY ---
-            // Determine if this row is part of the candle body or wick
-            // Note: Since prices are floats, we use a small epsilon or just ranges
-            const p = price;
-            const topBody = Math.max(c.open, c.close);
-            const botBody = Math.min(c.open, c.close);
-            const eps = this.tickSize / 2;
+        // Clip to Box
+        ctx.beginPath();
+        ctx.rect(lensX, lensY, lensSize, lensSize);
+        ctx.clip();
 
-            // 1. WICK (Vertical Line)
-            // If price is between Low and High
-            if (p <= c.high && p >= c.low) {
-                ctx.fillStyle = 'rgba(255, 255, 255, 0.1)'; // Subtle wick guide
-                ctx.fillRect(centerX - 1, drawY, 2, lensRowH);
-            }
+        // Swap State
+        const saveZx = this.zoomX;
+        const saveZy = this.zoomY;
+        const saveOx = this.offsetX;
+        const saveOy = this.offsetY;
 
-            // 2. BODY (Colored Background)
-            // If price is strictly inside the body range
-            // We use a slight overlap logic for smoother look
-            if (p <= topBody && p >= botBody) {
-                ctx.fillStyle = bull ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)';
-                ctx.fillRect(lx + 2, drawY, lensW - 4, lensRowH);
-            }
+        this.zoomX = lensZoomX;
+        this.zoomY = lensZoomY;
+        this.offsetX = lensOffsetX;
+        this.offsetY = calcLensOffsetY;
 
-            // 3. BODY EDGES (Open/Close Lines)
-            // Check proximity to Open
-            if (Math.abs(p - c.open) < eps || Math.abs(p - c.close) < eps) {
-                ctx.strokeStyle = candleColor;
-                ctx.lineWidth = 1;
-                ctx.setLineDash([2, 2]); // Dashed border for Body limits
-                ctx.beginPath();
-                ctx.moveTo(lx + 2, drawY + (p === topBody ? 0 : lensRowH)); // Draw at top or bottom? 
-                // Simplification for list view: Draw border at Top of row if Price ~ TopBody
-                // Draw border at Bottom of row if Price ~ BotBody. 
-                // Since sorted descending: TopBody is first.
+        // Render
+        if (this.showHeatmap) this._drawHeatmap(ctx);
+        this._drawGrid(ctx); // Grid lines might look weird without bounds check, but OK
+        this._drawCandles(ctx);
+        if (this.showBigTrades) this._drawBigTrades(ctx);
 
-                // Let's just draw Top/Bottom lines of the rect for this row if it matches
-                if (Math.abs(p - topBody) < eps) {
-                    ctx.beginPath(); ctx.moveTo(lx + 2, drawY); ctx.lineTo(lx + lensW - 2, drawY); ctx.stroke();
-                }
-                if (Math.abs(p - botBody) < eps) {
-                    ctx.beginPath(); ctx.moveTo(lx + 2, drawY + lensRowH); ctx.lineTo(lx + lensW - 2, drawY + lensRowH); ctx.stroke();
-                }
-                ctx.setLineDash([]);
-            }
-            // ----------------------------
+        // Restore State
+        this.zoomX = saveZx;
+        this.zoomY = saveZy;
+        this.offsetX = saveOx;
+        this.offsetY = saveOy;
 
-            if (data.imbalance) {
-                // Overlay imbalance highlight stronger if needed, or keep subtle
-                ctx.fillStyle = data.imbalance === 'buy' ? 'rgba(16, 185, 129, 0.1)' : 'rgba(239, 68, 68, 0.1)';
-                ctx.fillRect(lx + 1, drawY, lensW - 2, lensRowH);
-            }
+        ctx.restore();
 
-            const maxBarW = (lensW / 2) - 50;
 
-            // Bid
-            if (data.bid > 0) {
-                const w = Math.min(maxBarW, (data.bid / maxVol) * maxBarW * 2.5);
-                ctx.fillStyle = 'rgba(239, 68, 68, 0.6)';
-                ctx.fillRect(centerX - w - 2, drawY + 2, w, lensRowH - 4);
-
-                ctx.fillStyle = '#ddd';
-                ctx.textAlign = 'right';
-                ctx.font = 'bold 11px "Roboto Mono", monospace';
-                ctx.fillText(data.bid.toFixed(0), centerX - 6, drawY + 11);
-            }
-
-            // Ask
-            if (data.ask > 0) {
-                const w = Math.min(maxBarW, (data.ask / maxVol) * maxBarW * 2.5);
-                ctx.fillStyle = 'rgba(16, 185, 129, 0.6)';
-                ctx.fillRect(centerX + 2, drawY + 2, w, lensRowH - 4);
-
-                ctx.fillStyle = '#ddd';
-                ctx.textAlign = 'left';
-                ctx.font = 'bold 11px "Roboto Mono", monospace';
-                ctx.fillText(data.ask.toFixed(0), centerX + 6, drawY + 11);
-            }
-
-            // Price (Left side)
-            ctx.fillStyle = '#666';
+        // --- 4. DATA HEADER OVERLAY (Inside Lens) ---
+        // Draw a header bar inside the lens to show exact Time/Price/Delta
+        if (this.hoveredCandle) {
+            ctx.save();
+            ctx.fillStyle = 'rgba(0,0,0,0.7)';
+            ctx.fillRect(lensX, lensY, lensSize, 20);
+            ctx.fillStyle = '#ccc';
+            ctx.font = '10px Roboto Mono';
             ctx.textAlign = 'left';
-            ctx.font = '10px sans-serif';
-            ctx.fillText(price.toFixed(1), lx + 6, drawY + 11);
-
-            drawY += lensRowH;
+            const c = this.hoveredCandle;
+            const d = new Date(c.time);
+            const timeStr = `${d.getHours()}:${d.getMinutes().toString().padStart(2, '0')}`;
+            const delta = c.delta || 0;
+            ctx.fillText(`${timeStr} | $${this.currentPrice?.toFixed(1) || ''} | Δ ${delta.toFixed(0)}`, lensX + 5, lensY + 14);
+            ctx.restore();
         }
+
+        // --- 5. LENS BORDER ---
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(lensX, lensY, lensSize, lensSize);
+
+        // Center Crosshair inside Lens
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(lensCenterX - 10, lensCenterY); ctx.lineTo(lensCenterX + 10, lensCenterY);
+        ctx.moveTo(lensCenterX, lensCenterY - 10); ctx.lineTo(lensCenterX, lensCenterY + 10);
+        ctx.stroke();
+
     }
 
     _drawPriceLine(ctx) {
@@ -806,20 +785,29 @@ export class FootprintChart {
         for (const t of this.bigTrades) {
             const x = this._getX(t.candleIndex);
             const y = this._getY(t.price);
-            if (x < 0 || x > this.width || y < 0 || y > this.height) continue;
+            const deltaH = this._deltaH();
+            if (x < 0 || x > this.width || y < 0 || y > this.height - deltaH) continue;
 
-            const r = Math.min(25, Math.max(4, Math.sqrt(t.volume) * 0.5));
+            // Radius based on volume relative to threshold, MULTIPLIED by user scale
+            // Base size: 3px, Max: 20px
+            // Logarithmic scale for better distribution
+            const relVol = t.q / this.bigTradeThreshold;
+            const baseRadius = 3 + Math.log(relVol) * 3;
+            const radius = Math.max(2, Math.min(30, baseRadius * this.bigTradeScale)); // Apply Scale
 
-            // 3D BUBBLE EFFECT (Radial Gradient)
-            const grad = ctx.createRadialGradient(x - r / 3, y - r / 3, r / 10, x, y, r);
+            // 3D Sphere Effect (Radial Gradient)
+            const gradient = ctx.createRadialGradient(
+                x - radius * 0.3, y - radius * 0.3, radius * 0.1, // Highlight offset
+                x, y, radius // Base circle
+            );
 
             if (t.side === 'buy') {
-                grad.addColorStop(0, '#86efac'); // bright green center
-                grad.addColorStop(1, '#16a34a'); // darker green edge
+                gradient.addColorStop(0, '#86efac'); // bright green center
+                gradient.addColorStop(1, '#16a34a'); // darker green edge
                 ctx.strokeStyle = '#dcfce7';     // nearly white outline
             } else {
-                grad.addColorStop(0, '#fca5a5'); // bright red center
-                grad.addColorStop(1, '#dc2626'); // darker red edge
+                gradient.addColorStop(0, '#fca5a5'); // bright red center
+                gradient.addColorStop(1, '#dc2626'); // darker red edge
                 ctx.strokeStyle = '#fee2e2';     // nearly white outline
             }
 
@@ -952,8 +940,8 @@ export class FootprintChart {
             case 'C': this.toggleCrosshair(); break;
             case 'D': this.toggleDelta(); break;
             case 'I': this.toggleImbalances(); break;
-            case 'L': this.showNakedLiquidity = !this.showNakedLiquidity; this.requestDraw(); break;
-            case 'X': this.showLens = !this.showLens; this.requestDraw(); break;
+            case 'L': this.showLens = !this.showLens; this.requestDraw(); break;
+            case 'X': this.showNakedLiquidity = !this.showNakedLiquidity; this.requestDraw(); break;
             case 'M': window.dispatchEvent(new CustomEvent('toggle-ml-dashboard')); break;
             case '+': case '=': this.zoomX = Math.min(this.maxZoomX, this.zoomX * 1.1); break;
             case '-': case '_': this.zoomX = Math.max(this.minZoomX, this.zoomX / 1.1); break;
@@ -1008,8 +996,8 @@ export class FootprintChart {
             this.isDragging = true;
         }
 
-        this.lastX = e.clientX;
-        this.lastY = e.clientY;
+        this.lastX = x;
+        this.lastY = y;
     }
 
     _onMouseMove(e) {
@@ -1061,13 +1049,13 @@ export class FootprintChart {
             this.offsetX = this.dragStartX - (valAtPivot * newZoomX);
 
         } else if (this.isDragging) {
-            this.offsetX += e.clientX - this.lastX;
-            this.offsetY -= e.clientY - this.lastY;
+            this.offsetX += x - this.lastX;
+            this.offsetY -= y - this.lastY;
         }
 
         if (this.isDragging || this.isDraggingPrice || this.isDraggingTime || this.showLens) {
-            this.lastX = e.clientX;
-            this.lastY = e.clientY;
+            this.lastX = x;
+            this.lastY = y;
             this.requestDraw();
         } else {
             if (this.showCrosshair) this.requestDraw();

@@ -42,6 +42,7 @@ class CryptoFlowApp {
             toggleCrosshair: document.getElementById('toggleCrosshair'),
             toggleHeatmap: document.getElementById('toggleHeatmap'),
             toggleBigTrades: document.getElementById('toggleBigTrades'),
+            toggleSound: document.getElementById('toggleSound'), // NEW
             tickSizeSelect: document.getElementById('tickSizeSelect'),
             volume24h: document.getElementById('volume24h'),
             cvdValue: document.getElementById('cvdValue'),
@@ -65,7 +66,7 @@ class CryptoFlowApp {
 
         // Big trade thresholds (whale markers)
         this.bigTradeThresholds = {
-            btcusdt: 5.0,    // 5 BTC = whale
+            btcusdt: 20.0,   // 20 BTC = whale (User Default)
             ethusdt: 50.0,   // 50 ETH = whale
             solusdt: 500.0,  // 500 SOL = whale
             bnbusdt: 100.0   // 100 BNB = whale
@@ -166,6 +167,11 @@ class CryptoFlowApp {
         this.footprintChart.showBigTrades = showBigTrades;
         this.elements.toggleBigTrades.classList.toggle('active', showBigTrades);
 
+        // Sound State
+        const soundEnabled = settingsManager.get('soundEnabled') !== false; // Default true
+        audioService.setEnabled(soundEnabled);
+        if (this.elements.toggleSound) this.elements.toggleSound.classList.toggle('active', soundEnabled);
+
         // Volume Profile
         this.volumeProfile = new VolumeProfile('volumeProfileContainer', 'volumeProfileCanvas');
 
@@ -235,6 +241,29 @@ class CryptoFlowApp {
             this.elements.toggleBigTrades.classList.toggle('active', active);
             settingsManager.set('showBigTrades', active);
         });
+
+        // Toggle Sound
+        this.elements.toggleSound.addEventListener('click', () => {
+            const enabled = !audioService.enabled;
+            audioService.setEnabled(enabled);
+            this.elements.toggleSound.classList.toggle('active', enabled);
+            settingsManager.set('soundEnabled', enabled);
+        });
+
+        // Bubble Scale Slider (Visual Size)
+        const bubbleScaleSlider = document.getElementById('bubbleScaleSlider');
+        if (bubbleScaleSlider) {
+            // Load saved
+            const savedScale = settingsManager.get('bubbleScale') || 1.0;
+            bubbleScaleSlider.value = savedScale;
+            this.footprintChart.setBigTradeScale(savedScale);
+
+            bubbleScaleSlider.addEventListener('input', (e) => {
+                const val = parseFloat(e.target.value);
+                this.footprintChart.setBigTradeScale(val);
+                settingsManager.set('bubbleScale', val);
+            });
+        }
 
         // Listen for 'M' key event from chart
         window.addEventListener('toggle-ml-dashboard', () => {
