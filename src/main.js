@@ -118,24 +118,9 @@ class CryptoFlowApp {
         const savedTickSize = settingsManager.getTickSize(this.currentSymbol) || this.tickSizes[this.currentSymbol];
         this.footprintChart.setTickSize(savedTickSize);
 
-        // Apply heatmap slider settings
-        const savedHeatIntensity = settingsManager.getHeatmapIntensityThreshold();
-        if (typeof savedHeatIntensity === 'number') {
-            this.footprintChart.setHeatmapIntensityThreshold(savedHeatIntensity);
-            const heatmapValue = document.getElementById('heatmapIntensityValue');
-            const heatmapSlider = document.getElementById('heatmapIntensitySlider');
-            if (heatmapSlider) heatmapSlider.value = String(savedHeatIntensity);
-            if (heatmapValue) heatmapValue.textContent = Math.round(savedHeatIntensity * 100) + '%';
-        }
-
-        const savedHeatHistory = settingsManager.getHeatmapHistoryPercent();
-        if (typeof savedHeatHistory === 'number') {
-            this.footprintChart.setHeatmapHistoryPercent(savedHeatHistory);
-            const historySlider = document.getElementById('heatmapHistorySlider');
-            const historyValue = document.getElementById('heatmapHistoryValue');
-            if (historySlider) historySlider.value = String(savedHeatHistory);
-            if (historyValue) historyValue.textContent = savedHeatHistory + '%';
-        }
+        // Apply default heatmap settings
+        this.footprintChart.setHeatmapIntensityThreshold(0.05);
+        this.footprintChart.setHeatmapHistoryPercent(60);
 
         // Apply saved zoom
         const savedZoom = settingsManager.get('zoomLevel');
@@ -250,20 +235,7 @@ class CryptoFlowApp {
             settingsManager.set('soundEnabled', enabled);
         });
 
-        // Bubble Scale Slider (Visual Size)
-        const bubbleScaleSlider = document.getElementById('bubbleScaleSlider');
-        if (bubbleScaleSlider) {
-            // Load saved
-            const savedScale = settingsManager.get('bubbleScale') || 1.0;
-            bubbleScaleSlider.value = savedScale;
-            this.footprintChart.setBigTradeScale(savedScale);
 
-            bubbleScaleSlider.addEventListener('input', (e) => {
-                const val = parseFloat(e.target.value);
-                this.footprintChart.setBigTradeScale(val);
-                settingsManager.set('bubbleScale', val);
-            });
-        }
 
         // Listen for 'M' key event from chart
         window.addEventListener('toggle-ml-dashboard', () => {
@@ -279,8 +251,11 @@ class CryptoFlowApp {
         // Toggle ML Dashboard Button logic
         if (this.elements.toggleML) {
             this.elements.toggleML.addEventListener('click', () => {
-                const active = this.mlDashboard.toggle(); // Ensure mlDashboard has toggle()
+                const active = this.mlDashboard.toggle();
                 this.elements.toggleML.classList.toggle('active', active);
+                // Enable/Disable Wall Attack on chart
+                this.footprintChart.showML = active;
+                this.footprintChart.requestDraw();
             });
         }
 
@@ -289,25 +264,53 @@ class CryptoFlowApp {
         const whaleSlider = document.getElementById('whaleThresholdSlider');
         const whaleValue = document.getElementById('whaleThresholdValue');
         if (whaleSlider && whaleValue) {
-            // Initialize from persisted settings
+            // Initialize from persisted settings or Default 1.0
             const persisted = settingsManager.getBigTradeThreshold(this.currentSymbol);
-            if (typeof persisted === 'number') {
-                whaleSlider.value = String(Math.round(persisted));
-                whaleValue.textContent = String(Math.round(persisted));
-                this.footprintChart.setBigTradeThreshold(persisted);
+            const val = (typeof persisted === 'number') ? persisted : 1.0;
+
+            whaleSlider.value = String(val);
+            whaleValue.textContent = String(val);
+            this.footprintChart.setBigTradeThreshold(val);
+
+            // Heatmap intensity slider
+            const heatmapSlider = document.getElementById('heatmapIntensitySlider');
+            const heatmapValue = document.getElementById('heatmapIntensityValue');
+            if (heatmapSlider && heatmapValue) {
+                // Initialize from persisted settings or Default 0.05
+                const persistedIntensity = settingsManager.getHeatmapIntensityThreshold();
+                const intensityVal = (typeof persistedIntensity === 'number') ? persistedIntensity : 0.05;
+
+                heatmapSlider.value = String(intensityVal);
+                heatmapValue.textContent = Math.round(intensityVal * 100) + '%';
+                this.footprintChart.setHeatmapIntensityThreshold(intensityVal);
+
+                heatmapSlider.addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    heatmapValue.textContent = Math.round(val * 100) + '%';
+                    this.footprintChart.setHeatmapIntensityThreshold(val);
+                    settingsManager.setHeatmapIntensityThreshold(val);
+                });
+            }
+
+            // Heatmap history slider
+            const historySlider = document.getElementById('heatmapHistorySlider');
+            const historyValue = document.getElementById('heatmapHistoryValue');
+            if (historySlider && historyValue) {
+                historySlider.addEventListener('input', (e) => {
+                    const val = parseInt(e.target.value, 10);
+                    historyValue.textContent = val + '%';
+                    this.footprintChart.setHeatmapHistoryPercent(val);
+                    settingsManager.setHeatmapHistoryPercent(val);
+                });
             }
 
             whaleSlider.addEventListener('input', (e) => {
                 const val = parseFloat(e.target.value);
-                whaleValue.textContent = val;
+                whaleValue.textContent = val.toFixed(1);
                 this.footprintChart.setBigTradeThreshold(val);
                 settingsManager.setBigTradeThreshold(this.currentSymbol, val);
-
-                this.footprintChart.autoFilter = false; // Disable auto on manual change
-                document.getElementById('toggleAutoFilter')?.classList.remove('active');
             });
         }
-
         // Auto Filter Toggle
         const toggleAutoFilter = document.getElementById('toggleAutoFilter');
         if (toggleAutoFilter) {
@@ -321,50 +324,10 @@ class CryptoFlowApp {
                     // Sync UI
                     const whaleSliderEl = document.getElementById('whaleThresholdSlider');
                     const whaleValueEl = document.getElementById('whaleThresholdValue');
-                    if (whaleSliderEl) whaleSliderEl.value = String(Math.round(next));
-                    if (whaleValueEl) whaleValueEl.textContent = String(Math.round(next));
+                    if (whaleSliderEl) whaleSliderEl.value = String(next.toFixed(1));
+                    if (whaleValueEl) whaleValueEl.textContent = String(next.toFixed(1));
                 }
             });
-        }
-
-        // Heatmap intensity slider
-        const heatmapSlider = document.getElementById('heatmapIntensitySlider');
-        const heatmapValue = document.getElementById('heatmapIntensityValue');
-        if (heatmapSlider && heatmapValue) {
-            heatmapSlider.addEventListener('input', (e) => {
-                const val = parseFloat(e.target.value);
-                heatmapValue.textContent = Math.round(val * 100) + '%';
-                this.footprintChart.setHeatmapIntensityThreshold(val);
-                settingsManager.setHeatmapIntensityThreshold(val);
-            });
-        }
-
-        // Heatmap history slider
-        const historySlider = document.getElementById('heatmapHistorySlider');
-        const historyValue = document.getElementById('heatmapHistoryValue');
-        if (historySlider && historyValue) {
-            historySlider.addEventListener('input', (e) => {
-                const val = parseInt(e.target.value, 10);
-                historyValue.textContent = val + '%';
-                this.footprintChart.setHeatmapHistoryPercent(val);
-                settingsManager.setHeatmapHistoryPercent(val);
-            });
-        }
-
-        // Toggle Market Analysis
-        const toggleAnalysis = document.getElementById('toggleAnalysis');
-        const marketAnalysis = document.getElementById('marketAnalysis');
-        if (toggleAnalysis && marketAnalysis) {
-            toggleAnalysis.addEventListener('click', () => {
-                marketAnalysis.classList.toggle('hidden');
-                toggleAnalysis.classList.toggle('active', !marketAnalysis.classList.contains('hidden'));
-            });
-
-            // Default to hidden on mobile or if requested
-            if (window.innerWidth < 1000) {
-                marketAnalysis.classList.add('hidden');
-                toggleAnalysis.classList.remove('active');
-            }
         }
 
         // Tick size selector

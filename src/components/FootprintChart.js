@@ -349,6 +349,11 @@ export class FootprintChart {
             if (this.showBigTrades) this._drawBigTrades(ctx);
             if (this.showCrosshair && this.crosshairX) this._drawCrosshair(ctx);
             if (this.showLens) this._drawLens(ctx);
+
+            // Wall Attack (Always On or toggle? User asked for it, lets keep it always on or tied to ML)
+            // Let's tie it to 'showML' flag for now, or just always show if heavy wall nearby.
+            if (this.showML) this._drawWallAttack(ctx);
+
         } catch (e) {
             console.error('Chart Render Error:', e);
             // Fallback: Draw Error Text
@@ -481,35 +486,33 @@ export class FootprintChart {
 
                 if (y + h < 0 || y > height - deltaH) continue;
 
-                const ratio = lev.q / this.maxVolumeInHistory; // 0 to 1
-                if (ratio < this.heatmapIntensityThreshold) continue; // Slider
+                // 1. Noise Filter: Ignore < 2% of max volume (cleans up "Blue Rain")
+                // 1. Threshold Filter (Controlled by Slider)
+                const ratio = lev.q / this.maxVolumeInHistory;
+                if (ratio < this.heatmapIntensityThreshold) continue; // Slider Control Only
 
                 // BOOKMAP STYLE: Gamma Corrected Opacity
                 const visRatio = Math.pow(ratio, 0.4);
 
                 let color;
-                const alpha = this.heatmapOpacity;
+                const alpha = this.heatmapOpacity; // Default 1.0 or user setting?
 
-                if (visRatio < 0.15) {
-                    if (visRatio < 0.05) continue;
-                    const localAlpha = alpha * (visRatio / 0.15);
-                    color = `rgba(0, 0, 50, ${localAlpha})`;
-                } else if (visRatio < 0.3) {
-                    color = `rgba(0, 0, 150, ${alpha})`;
-                } else if (visRatio < 0.45) {
-                    color = `rgba(0, 150, 255, ${alpha})`;
+                if (visRatio < 0.2) {
+                    // Very Low (Dark Blue) - Make it more transparent
+                    color = `rgba(0, 50, 200, ${alpha * 0.4})`;
+                } else if (visRatio < 0.4) {
+                    color = `rgba(0, 150, 255, ${alpha * 0.6})`;
                 } else if (visRatio < 0.6) {
-                    color = `rgba(0, 255, 0, ${alpha})`;
-                } else if (visRatio < 0.75) {
+                    color = `rgba(0, 255, 100, ${alpha * 0.8})`;
+                } else if (visRatio < 0.8) {
                     color = `rgba(255, 255, 0, ${alpha})`;
-                } else if (visRatio < 0.9) {
-                    color = `rgba(255, 69, 0, ${alpha})`;
                 } else {
-                    color = `rgba(255, 255, 255, ${alpha})`;
+                    color = `rgba(255, 0, 0, ${alpha})`; // MAX Heat
                 }
 
                 bufCtx.fillStyle = color;
-                bufCtx.fillRect(x, y - h / 2, w, h);
+                // +1 width to prevent vertical gaps between candles
+                bufCtx.fillRect(x, y - h / 2, w + 1, h);
             }
         }
         ctx.drawImage(this.heatmapBuffer, 0, 0);
@@ -553,9 +556,9 @@ export class FootprintChart {
                 const tStr = `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
                 const dStr = `${d.getDate().toString().padStart(2, '0')}.${(d.getMonth() + 1).toString().padStart(2, '0')}`; // DD.MM
 
-                // Background Box (Taller for stacked text)
-                ctx.fillStyle = this.colors.bg;
-                ctx.fillRect(x - 22, chartHeight - 32, 44, 28);
+                // Background Box REMOVED for cleaner look
+                // ctx.fillStyle = this.colors.bg;
+                // ctx.fillRect(x - 22, chartHeight - 32, 44, 28);
 
                 // Time (Top)
                 ctx.textAlign = 'center';
@@ -667,13 +670,13 @@ export class FootprintChart {
                     }
 
                     // VOLUME BARS (Graphic Level)
-                    // Bid Left
+                    // Bid Left (Red/Sell)
                     if (data.bid > 0) {
                         const len = (data.bid / maxVol) * halfWidth;
                         ctx.fillStyle = this.colors.barSell;
                         ctx.fillRect(centerX - gap - len, drawY + 1, len, rowH - 1);
                     }
-                    // Ask Right
+                    // Ask Right (Green/Buy)
                     if (data.ask > 0) {
                         const len = (data.ask / maxVol) * halfWidth;
                         ctx.fillStyle = this.colors.barBuy;
@@ -685,9 +688,11 @@ export class FootprintChart {
                         ctx.fillStyle = this.colors.clusterText;
                         ctx.font = 'bold 11px "Roboto Mono", monospace';
 
+                        // Left Text (Bid/Red)
                         ctx.textAlign = 'right';
                         if (data.bid > 0) ctx.fillText(data.bid.toFixed(0), centerX - gap - 4, y + 4);
 
+                        // Right Text (Ask/Green)
                         ctx.textAlign = 'left';
                         if (data.ask > 0) ctx.fillText(data.ask.toFixed(0), centerX + gap + 4, y + 4);
                     }
@@ -1027,15 +1032,15 @@ export class FootprintChart {
             }
 
             ctx.beginPath();
-            ctx.arc(x, y, r, 0, Math.PI * 2);
-            ctx.fillStyle = grad;
+            ctx.arc(x, y, radius, 0, Math.PI * 2);
+            ctx.fillStyle = gradient;
             ctx.fill();
 
             ctx.lineWidth = 1;
             ctx.stroke();
 
             // Optional: Volume Label inside bigger bubbles
-            if (r > 8) {
+            if (radius > 8) {
                 ctx.fillStyle = '#fff';
                 ctx.font = 'bold 9px Arial';
                 ctx.textAlign = 'center';
@@ -1046,11 +1051,128 @@ export class FootprintChart {
     }
 
 
+    _drawWallAttack(ctx) {
+        if (!this.heatmapData || !this.currentPrice || !this.candles.length) return;
+
+        // 1. FIND THE WALL
+        // Look usage latest snapshot
+        const snapshot = this.heatmapData[this.heatmapData.length - 1];
+        if (!snapshot) return;
+
+        // Define "Wall" as > 10% of max volume (Lowered for visibility)
+        const wallThreshold = Math.max(5, this.maxVolumeInHistory * 0.1);
+
+        // Search visible range
+        const viewMin = this._getPriceFromY(this.height - this._deltaH());
+        const viewMax = this._getPriceFromY(0);
+
+        let nearestWall = null;
+        let minDist = Infinity;
+
+        const scan = (levels, type) => {
+            if (!levels) return;
+            for (const l of levels) {
+                if (l.p < viewMin || l.p > viewMax) continue; // Skip off-screen
+                if (l.q >= wallThreshold) {
+                    const dist = Math.abs(l.p - this.currentPrice);
+                    if (dist < minDist) {
+                        minDist = dist;
+                        nearestWall = { ...l, type };
+                    }
+                }
+            }
+        };
+        scan(snapshot.bids, 'bid');
+        scan(snapshot.asks, 'ask');
+
+        if (!nearestWall) {
+            // Draw "Scanning" status so user knows it's on
+            ctx.font = 'bold 11px "Inter", sans-serif';
+            ctx.fillStyle = '#666';
+            ctx.textAlign = 'right';
+            ctx.fillText('SCANNING FOR WALLS...', this.width - 20, 30);
+            return;
+        }
+
+        // 2. CALCULATE ATTACK STATS
+        // How much volume happened at this price in the last few candles?
+        let attackVol = 0;
+        const targetPrice = nearestWall.p;
+        const tick = this.tickSize;
+
+        // Look back last 5 candles
+        for (let i = this.candles.length - 1; i >= Math.max(0, this.candles.length - 5); i--) {
+            const c = this.candles[i];
+            if (!c || !c.clusters) continue;
+
+            // Extract cluster
+            let clusters = c.clusters instanceof Map ? Array.from(c.clusters.entries()) : Object.entries(c.clusters).map(([p, d]) => [parseFloat(p), d]);
+
+            for (const [p, vol] of clusters) {
+                if (Math.abs(p - targetPrice) < tick * 1.5) { // Close enough
+                    // If attacking ASK wall (Resistance), use BID volume (Real Buys in inverted logic)
+                    if (nearestWall.type === 'ask') attackVol += (vol.bid || 0);
+                    // If attacking BID wall (Support), use ASK volume (Real Sells in inverted logic)
+                    else attackVol += (vol.ask || 0);
+                }
+            }
+        }
+
+        // 3. PROBABILITY MATH
+        // Simple: Attack / Wall
+        // Advanced: Add momentum factor?
+        const ratio = Math.min(1, attackVol / nearestWall.q);
+        const probability = ratio * 100;
+
+        // 4. DRAW HUD
+        const y = this._getY(nearestWall.p);
+        const x = this.width - 220; // Right aligned
+
+        if (y < 0 || y > this.height - this._deltaH()) return;
+
+        // Box
+        ctx.fillStyle = 'rgba(10,10,10, 0.85)';
+        ctx.strokeStyle = nearestWall.type === 'ask' ? '#ef4444' : '#10b981';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.roundRect(x, y - 25, 200, 50, 8);
+        ctx.fill();
+        ctx.stroke();
+
+        // Title
+        ctx.font = 'bold 12px "Inter", sans-serif';
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'left';
+        ctx.fillText(`${nearestWall.type === 'ask' ? '🛡️ RESISTANCE' : '🛡️ SUPPORT'}`, x + 10, y - 5);
+
+        // Stats
+        ctx.font = '11px monospace';
+        ctx.fillStyle = '#aaa';
+        ctx.fillText(`Wall: ${nearestWall.q.toFixed(0)} | Hit: ${attackVol.toFixed(0)}`, x + 10, y + 15);
+
+        // Probability
+        ctx.textAlign = 'right';
+        ctx.font = 'bold 16px sans-serif';
+
+        // Color based on prob
+        let probColor = '#ef4444'; // Low
+        if (probability > 40) probColor = '#fbbf24'; // Med
+        if (probability > 75) probColor = '#10b981'; // High
+
+        ctx.fillStyle = probColor;
+        ctx.fillText(`${probability.toFixed(0)}%`, x + 190, y + 5);
+
+        ctx.font = '10px sans-serif';
+        ctx.fillStyle = '#666';
+        ctx.fillText('BREAK CHANCE', x + 190, y + 18);
+    }
 
     _drawCrosshair(ctx) {
         if (this.showLens) return;
 
         const { crosshairX, crosshairY, width, height } = this;
+        if (!crosshairX || !crosshairY) return;
+
         ctx.strokeStyle = 'rgba(255,255,255,0.2)';
         ctx.setLineDash([4, 4]);
         ctx.beginPath();

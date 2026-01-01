@@ -122,7 +122,7 @@ export class DataAggregator {
             const { price, quantity, time, isBuyerMaker } = trade;
             const roundedPrice = this.roundToTick(price);
             const candleStart = this.getCandleStart(time);
-            const isBuy = !isBuyerMaker;
+            const isBuy = isBuyerMaker; // USER REQUEST: Invert Logic
 
             // Check if we need a new candle
             if (this.currentCandleStart !== candleStart) {
@@ -186,7 +186,7 @@ export class DataAggregator {
         const { price, quantity, time, isBuyerMaker } = trade;
         const roundedPrice = this.roundToTick(price);
         const candleStart = this.getCandleStart(time);
-        const isBuy = !isBuyerMaker; // isBuyerMaker = true means sell
+        const isBuy = isBuyerMaker; // USER REQUEST: Invert Logic
 
         // Check for session reset (new day at 00:00 UTC)
         this._checkSessionReset();
@@ -387,7 +387,7 @@ export class DataAggregator {
             const { price, quantity, time, isBuyerMaker } = trade;
             const roundedPrice = this.roundToTick(price);
             const candleStart = this.getCandleStart(time);
-            const isBuy = !isBuyerMaker;
+            const isBuy = isBuyerMaker; // USER REQUEST: Invert Logic
 
             // Update cumulative stats
             if (isBuy) {
