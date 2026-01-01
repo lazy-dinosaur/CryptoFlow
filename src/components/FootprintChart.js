@@ -68,7 +68,7 @@ export class FootprintChart {
         // Heatmap defaults (Bookmap style)
         this.heatmapIntensityThreshold = 0.005; // Show more detail (was 0.02)
         this.heatmapOpacity = 0.8; // More solid/vibrant (was 0.5)
-        this.maxVolumeInHistory = 10;
+        this.maxVolumeInHistory = 5000; // Start high to avoid "Flash of Red" on load
         this.showBigTrades = true;
         this.bigTradeThreshold = 20.0; // User requested 20 default
         this.bigTradeScale = 1.0; // Visual size multiplier
@@ -206,6 +206,16 @@ export class FootprintChart {
     setHeatmapIntensityThreshold(val) { this.heatmapIntensityThreshold = val; this.requestDraw(); }
     setHeatmapHistoryPercent(val) {
         this.heatmapHistoryPercent = Math.max(0, Math.min(100, val));
+        this.requestDraw();
+    }
+
+    resetView() {
+        this.offsetX = 0; // Jump to latest time
+        this.initialCenterDone = false; // Allow next price update to auto-center Y
+        if (this.currentPrice) {
+            this.offsetY = (this.height / 2) - (this.currentPrice / this.tickSize * this.zoomY);
+            this.initialCenterDone = true; // Center immediately if price is known
+        }
         this.requestDraw();
     }
 
@@ -1049,6 +1059,8 @@ export class FootprintChart {
             }
         }
     }
+
+
 
 
     _drawWallAttack(ctx) {

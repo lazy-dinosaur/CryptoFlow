@@ -104,57 +104,12 @@
                 <option value="50">50</option>
               </select>
             </div>
-            <button class="control-btn active" id="toggleCrosshair" title="Toggle Crosshair">
-              <span>✚</span>
-            </button>
-            <button class="control-btn active" id="toggleImbalances" title="Toggle Imbalances">
-              <span>⚖️</span>
-            </button>
-            <button class="control-btn active" id="toggleDelta" title="Toggle Delta">
-              <span>Δ</span>
-            </button>
-            <button class="control-btn" id="toggleHeatmap" title="Toggle Heatmap">
-              <span>🔥</span>
-            </button>
-            <div class="whale-slider-container" title="Heatmap Intensity Threshold">
-              <span style="font-size: 10px; margin-right: 4px;">🔥</span>
-              <input type="range" id="heatmapIntensitySlider" min="0" max="0.2" step="0.005" value="0.02"
-                class="wide-slider">
-              <span id="heatmapIntensityValue" class="slider-value">2%</span>
-            </div>
-            <div class="whale-slider-container" title="Heatmap History (0-100%)">
-              <span style="font-size: 10px; margin-right: 4px;">📊</span>
-              <input type="range" id="heatmapHistorySlider" min="0" max="100" step="5" value="60" class="wide-slider">
-              <span id="heatmapHistoryValue" class="slider-value">60%</span>
-            </div>
-            <div class="whale-slider-container" title="Heatmap History (0-100%)">
-              <span style="font-size: 10px; margin-right: 4px;">📊</span>
-              <input type="range" id="heatmapHistorySlider" min="0" max="100" step="5" value="60" class="wide-slider">
-              <span id="heatmapHistoryValue" class="slider-value">60%</span>
-            </div>
-            <button class="control-btn active" id="toggleSound" title="Toggle Sound">
-              <span>🔊</span>
-            </button>
+
             <div class="divider-vertical"
               style="width: 1px; height: 24px; background: rgba(255,255,255,0.1); margin: 0 4px;"></div>
 
-            <button class="control-btn active" id="toggleBigTrades" title="Toggle Big Trades">
-              <span>🐋</span>
-            </button>
-            <div class="whale-slider-container">
-              <span style="font-size: 10px; margin-right: 4px;">Min:</span>
-              <input type="range" id="whaleThresholdSlider" min="0.1" max="50" step="0.1" value="1.0"
-                title="Whale Threshold (BTC)" class="wide-slider" style="width: 100px;">
-              <span id="whaleThresholdValue" class="slider-value">1.0</span>
-
-              <button class="small-btn" id="toggleAutoFilter" title="Auto-Adaptive Filter"
-                style="margin-left: 8px; font-size: 10px; padding: 2px 5px;">AUTO</button>
-            </div>
-            <div class="divider-vertical"
-              style="width: 1px; height: 24px; background: rgba(255,255,255,0.1); margin: 0 4px;"></div>
-
-            <button class="control-btn active" id="toggleML" title="Toggle ML Dashboard">
-              <span>🤖</span>
+            <button class="control-btn" id="settingsBtn" title="Settings">
+              <span>⚙️</span>
             </button>
           </div>
         </div>
@@ -239,6 +194,102 @@
         <span class="stat-value" id="pocValue">--</span>
       </div>
     </footer>
+  </div>
+
+  <!-- Settings Modal -->
+  <div id="settingsModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2><span>⚙️</span> Chart Settings</h2>
+        <button class="close-modal" id="closeSettingsBtn">&times;</button>
+      </div>
+
+      <!-- VISUALS Group -->
+      <div class="settings-group">
+        <h3>Visuals</h3>
+        <div class="control-row">
+          <label>Heatmap</label>
+          <label class="switch">
+            <input type="checkbox" id="toggleHeatmap">
+            <span class="slider-switch"></span>
+          </label>
+        </div>
+        <div class="control-row">
+          <label>Cumulative Delta (CVD)</label>
+          <label class="switch">
+            <input type="checkbox" id="toggleCVD" checked>
+            <span class="slider-switch"></span>
+          </label>
+        </div>
+        <div class="control-row">
+          <label>Imbalance Highlights</label>
+          <label class="switch">
+            <input type="checkbox" id="toggleImbalances" checked>
+            <span class="slider-switch"></span>
+          </label>
+        </div>
+        <div class="control-row">
+          <label>Big Trade Bubbles 🐋</label>
+          <label class="switch">
+            <input type="checkbox" id="toggleBigTrades" checked>
+            <span class="slider-switch"></span>
+          </label>
+        </div>
+        <div class="control-row">
+          <label>Wall Attack Bot 🤖</label>
+          <label class="switch">
+            <input type="checkbox" id="toggleML">
+            <span class="slider-switch"></span>
+          </label>
+        </div>
+      </div>
+
+      <!-- HEATMAP CONFIG Group -->
+      <div class="settings-group">
+        <h3>Heatmap Configuration</h3>
+        <div class="control-row">
+          <label>Intensity (Sensitivity)</label>
+          <div class="controls">
+            <input type="range" id="heatmapIntensitySlider" min="0" max="0.2" step="0.005" value="0.02">
+            <span id="heatmapIntensityValue" class="value-display">2%</span>
+          </div>
+        </div>
+        <div class="control-row">
+          <label>History Length</label>
+          <div class="controls">
+            <input type="range" id="heatmapHistorySlider" min="0" max="100" step="5" value="60">
+            <span id="heatmapHistoryValue" class="value-display">60%</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ALERTS & FILTERS Group -->
+      <div class="settings-group">
+        <h3>Filters & Alerts</h3>
+        <div class="control-row">
+          <label>Whale Threshold (BTC)</label>
+          <div class="controls">
+            <input type="range" id="whaleThresholdSlider" min="0.1" max="50" step="0.1" value="1.0">
+            <span id="whaleThresholdValue" class="value-display">1.0</span>
+          </div>
+        </div>
+        <div class="control-row">
+          <label>Bubble Size</label>
+          <div class="controls">
+            <input type="range" id="bubbleSizeSlider" min="0.5" max="3.0" step="0.1" value="1.0">
+            <span id="bubbleSizeValue" class="value-display">1.0x</span>
+          </div>
+        </div>
+        <div class="control-row">
+          <label>Sound Alerts 🔊</label>
+          <label class="switch">
+            <input type="checkbox" id="toggleSound" checked>
+            <span class="slider-switch"></span>
+          </label>
+        </div>
+      </div>
+
+    </div>
   </div>
 
   <script type="module" src="/src/main.js"></script>

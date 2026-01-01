@@ -19,7 +19,7 @@ export class DepthHeatmapStore {
         this.lastSnapshotTime = 0;
 
         // Statistics for relative coloring
-        this.maxVolumeInHistory = 10;
+        this.maxVolumeInHistory = 5000;
 
         // Persistence
         this.pendingSnapshots = []; // Snapshots to upload
@@ -223,11 +223,10 @@ export class DepthHeatmapStore {
      * Reset history
      */
     reset() {
-        this.snapshots = [];
         this.currentBids.clear();
         this.currentAsks.clear();
         this.lastSnapshotTime = 0;
-        this.maxVolumeInHistory = 10;
+        this.maxVolumeInHistory = 5000; // Start high to avoid flash
     }
 }
 

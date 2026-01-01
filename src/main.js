@@ -132,30 +132,27 @@ class CryptoFlowApp {
         };
 
         // Apply toggles from settings
+        // Apply toggles from settings (Checkboxes)
         const showDelta = settingsManager.get('showDelta') !== false;
         this.footprintChart.showDelta = showDelta;
-        this.elements.toggleDelta.classList.toggle('active', showDelta);
+        if (this.elements.toggleDelta) this.elements.toggleDelta.checked = showDelta;
 
         const showImbalances = settingsManager.get('showImbalances') !== false;
         this.footprintChart.showImbalances = showImbalances;
-        this.elements.toggleImbalances.classList.toggle('active', showImbalances);
-
-        const showCrosshair = settingsManager.get('showCrosshair') !== false;
-        this.footprintChart.showCrosshair = showCrosshair;
-        this.elements.toggleCrosshair.classList.toggle('active', showCrosshair);
+        if (this.elements.toggleImbalances) this.elements.toggleImbalances.checked = showImbalances;
 
         const showHeatmap = settingsManager.get('showHeatmap') === true;
         this.footprintChart.showHeatmap = showHeatmap;
-        this.elements.toggleHeatmap.classList.toggle('active', showHeatmap);
+        if (this.elements.toggleHeatmap) this.elements.toggleHeatmap.checked = showHeatmap;
 
         const showBigTrades = settingsManager.get('showBigTrades') !== false;
         this.footprintChart.showBigTrades = showBigTrades;
-        this.elements.toggleBigTrades.classList.toggle('active', showBigTrades);
+        if (this.elements.toggleBigTrades) this.elements.toggleBigTrades.checked = showBigTrades;
 
         // Sound State
         const soundEnabled = settingsManager.get('soundEnabled') !== false; // Default true
         audioService.setEnabled(soundEnabled);
-        if (this.elements.toggleSound) this.elements.toggleSound.classList.toggle('active', soundEnabled);
+        if (this.elements.toggleSound) this.elements.toggleSound.checked = soundEnabled;
 
         // Volume Profile
         this.volumeProfile = new VolumeProfile('volumeProfileContainer', 'volumeProfileCanvas');
@@ -182,12 +179,23 @@ class CryptoFlowApp {
      * Setup DOM event listeners
      */
     _setupEventListeners() {
+        // Modal Logic
+        const modal = document.getElementById('settingsModal');
+        const openBtn = document.getElementById('settingsBtn');
+        const closeBtn = document.getElementById('closeSettingsBtn');
+
+        if (openBtn) openBtn.onclick = () => modal.style.display = "block";
+        if (closeBtn) closeBtn.onclick = () => modal.style.display = "none";
+        window.onclick = (e) => {
+            if (e.target == modal) modal.style.display = "none";
+        };
+
         // Symbol selector
         this.elements.symbolSelect.addEventListener('change', (e) => {
             this._switchSymbol(e.target.value);
         });
 
-        // Timeframe buttons
+        // Timeframe buttons (Keep as is)
         this.elements.timeframeBtns.forEach(btn => {
             btn.addEventListener('click', () => {
                 this._switchTimeframe(parseInt(btn.dataset.tf, 10));
@@ -196,44 +204,74 @@ class CryptoFlowApp {
             });
         });
 
-        // Toggle buttons
-        this.elements.toggleDelta.addEventListener('click', () => {
-            const active = this.footprintChart.toggleDelta();
-            this.elements.toggleDelta.classList.toggle('active', active);
-            settingsManager.set('showDelta', active);
-        });
+        // --- NEW CHECKBOX HANDLERS ---
 
-        this.elements.toggleImbalances.addEventListener('click', () => {
-            const active = this.footprintChart.toggleImbalances();
-            this.elements.toggleImbalances.classList.toggle('active', active);
-            settingsManager.set('showImbalances', active);
-        });
+        // Delta
+        if (this.elements.toggleDelta) {
+            // Set initial state
+            this.elements.toggleDelta.checked = this.footprintChart.showDelta;
+            this.elements.toggleDelta.addEventListener('change', (e) => {
+                const active = e.target.checked;
+                this.footprintChart.showDelta = active;
+                settingsManager.set('showDelta', active);
+                this.footprintChart.requestDraw();
+            });
+        }
 
-        this.elements.toggleCrosshair.addEventListener('click', () => {
-            const active = this.footprintChart.toggleCrosshair();
-            this.elements.toggleCrosshair.classList.toggle('active', active);
-            settingsManager.set('showCrosshair', active);
-        });
+        // Imbalances
+        if (this.elements.toggleImbalances) {
+            this.elements.toggleImbalances.checked = this.footprintChart.showImbalances;
+            this.elements.toggleImbalances.addEventListener('change', (e) => {
+                const active = e.target.checked;
+                this.footprintChart.showImbalances = active;
+                settingsManager.set('showImbalances', active);
+                this.footprintChart.requestDraw();
+            });
+        }
 
-        this.elements.toggleHeatmap.addEventListener('click', () => {
-            const active = this.footprintChart.toggleHeatmap();
-            this.elements.toggleHeatmap.classList.toggle('active', active);
-            settingsManager.set('showHeatmap', active);
-        });
+        // CVD
+        const toggleCVD = document.getElementById('toggleCVD');
+        if (toggleCVD) {
+            toggleCVD.checked = this.footprintChart.showCVD !== false;
+            toggleCVD.addEventListener('change', (e) => {
+                const active = e.target.checked;
+                this.footprintChart.showCVD = active;
+                settingsManager.set('showCVD', active);
+                this.footprintChart.requestDraw();
+            });
+        }
 
-        this.elements.toggleBigTrades.addEventListener('click', () => {
-            const active = this.footprintChart.toggleBigTrades();
-            this.elements.toggleBigTrades.classList.toggle('active', active);
-            settingsManager.set('showBigTrades', active);
-        });
+        // Heatmap
+        if (this.elements.toggleHeatmap) {
+            this.elements.toggleHeatmap.checked = this.footprintChart.showHeatmap;
+            this.elements.toggleHeatmap.addEventListener('change', (e) => {
+                const active = e.target.checked;
+                this.footprintChart.showHeatmap = active;
+                settingsManager.set('showHeatmap', active);
+                this.footprintChart.requestDraw();
+            });
+        }
 
-        // Toggle Sound
-        this.elements.toggleSound.addEventListener('click', () => {
-            const enabled = !audioService.enabled;
-            audioService.setEnabled(enabled);
-            this.elements.toggleSound.classList.toggle('active', enabled);
-            settingsManager.set('soundEnabled', enabled);
-        });
+        // Big Trades
+        if (this.elements.toggleBigTrades) {
+            this.elements.toggleBigTrades.checked = this.footprintChart.showBigTrades;
+            this.elements.toggleBigTrades.addEventListener('change', (e) => {
+                const active = e.target.checked;
+                this.footprintChart.showBigTrades = active;
+                settingsManager.set('showBigTrades', active);
+                this.footprintChart.requestDraw();
+            });
+        }
+
+        // Sound
+        if (this.elements.toggleSound) {
+            this.elements.toggleSound.checked = audioService.enabled;
+            this.elements.toggleSound.addEventListener('change', (e) => {
+                const enabled = e.target.checked;
+                audioService.setEnabled(enabled);
+                settingsManager.set('soundEnabled', enabled);
+            });
+        }
 
 
 
@@ -249,13 +287,35 @@ class CryptoFlowApp {
         });
 
         // Toggle ML Dashboard Button logic
+        // Toggle ML Dashboard (Checkbox)
         if (this.elements.toggleML) {
-            this.elements.toggleML.addEventListener('click', () => {
-                const active = this.mlDashboard.toggle();
-                this.elements.toggleML.classList.toggle('active', active);
-                // Enable/Disable Wall Attack on chart
+            this.elements.toggleML.checked = this.mlDashboard.isVisible; // Assuming getter
+            // Actually mlDashboard.toggle returns active state.
+            this.elements.toggleML.addEventListener('change', (e) => {
+                const active = e.target.checked;
+                if (active !== this.mlDashboard.active) {
+                    this.mlDashboard.toggle(); // This method might need check
+                }
                 this.footprintChart.showML = active;
                 this.footprintChart.requestDraw();
+            });
+        }
+
+        // Bubble Size Slider (New)
+        const bubbleSizeSlider = document.getElementById('bubbleSizeSlider');
+        const bubbleSizeValue = document.getElementById('bubbleSizeValue');
+        if (bubbleSizeSlider) {
+            const savedScale = settingsManager.get('bigTradeScale') || 1.0;
+            bubbleSizeSlider.value = savedScale;
+            bubbleSizeValue.textContent = savedScale + 'x';
+            this.footprintChart.bigTradeScale = savedScale;
+
+            bubbleSizeSlider.addEventListener('input', (e) => {
+                const val = parseFloat(e.target.value);
+                bubbleSizeValue.textContent = val.toFixed(1) + 'x';
+                this.footprintChart.bigTradeScale = val;
+                this.footprintChart.requestDraw();
+                settingsManager.set('bigTradeScale', val);
             });
         }
 
@@ -538,14 +598,22 @@ class CryptoFlowApp {
                 }
             } catch (vpsError) {
                 this._updateLoadingText('⚠️ VPS failed. Trying Binance...');
+
             }
 
             // Fallback to Binance raw trades if VPS didn't work
             if (!vpsAvailable) {
                 this._updateLoadingText('Fetching historical trades from Binance...');
+
+                // Scale history based on timeframe (e.g. 1h needs more history than 1m)
+                let minutesToLoad = this.historyMinutes;
+                if (this.currentTimeframe === 5) minutesToLoad = 60;
+                if (this.currentTimeframe === 15) minutesToLoad = 120;
+                if (this.currentTimeframe === 60) minutesToLoad = 240; // 4 hours
+
                 const trades = await fetchTradesForPeriod(
                     symbol.toUpperCase(),
-                    this.historyMinutes,
+                    minutesToLoad,
                     (progress) => {
                         this._updateLoadingText(`Fetching trades... ${progress}%`);
                     }
@@ -555,12 +623,14 @@ class CryptoFlowApp {
                     this._updateLoadingText(`Processing ${trades.length} trades...`);
                     await new Promise(r => setTimeout(r, 50));
 
+                    dataAggregator.timeframe = this.currentTimeframe; // Ensure correct mode
                     dataAggregator.processHistoricalTrades(trades, (progress) => {
                         this._updateLoadingText(`Processing trades... ${progress}%`);
                     });
 
                     this._updateCharts();
                 } else {
+                    this._updateLoadingText('⚠️ No trades found.');
                 }
             }
         } catch (error) {
@@ -610,23 +680,50 @@ class CryptoFlowApp {
 
                 // Reset and import new candles
                 dataAggregator.reset();
-                dataAggregator.timeframe = minutes;
+                dataAggregator.setTimeframe(minutes); // Update Aggregator Mode
                 dataAggregator.importCandles(vpsCandles);
 
             } else {
-                // Just update timeframe for new trades
-                dataAggregator.timeframe = minutes;
-                dataAggregator.reset();
+                throw new Error('VPS returned 0 candles');
             }
         } catch (error) {
-            console.error(`Failed to load ${minutes}m candles:`, error);
-            // Fallback: just change timeframe for new trades
-            dataAggregator.timeframe = minutes;
+            console.error(`Failed to load ${minutes}m candles from VPS:`, error);
+
+            // FALLBACK: Load from Binance Raw Trades
+            this._updateLoadingText(`VPS Failed. Fetching raw trades...`);
+
+            // Calculate history needed
+            let historyMins = 10;
+            if (minutes === 5) historyMins = 60;
+            if (minutes === 15) historyMins = 120;
+            if (minutes === 60) historyMins = 240; // 4h
+
+            try {
+                const trades = await fetchTradesForPeriod(
+                    this.currentSymbol.toUpperCase(),
+                    historyMins,
+                    (p) => this._updateLoadingText(`Loading trades... ${p}%`)
+                );
+
+                if (trades && trades.length > 0) {
+                    dataAggregator.reset();
+                    dataAggregator.setTimeframe(minutes);
+                    dataAggregator.processHistoricalTrades(trades, (p) => this._updateLoadingText(`Processing... ${p}%`));
+                } else {
+                    // Just switch mode empty
+                    dataAggregator.setTimeframe(minutes);
+                }
+            } catch (binanceError) {
+                console.error('Binance fallback failed:', binanceError);
+                // Just switch mode empty
+                dataAggregator.setTimeframe(minutes);
+            }
         }
 
         // Hide loading and update charts
         this.elements.loadingOverlay.classList.add('hidden');
         this._updateCharts();
+        this.footprintChart.resetView(); // Auto-center on new timeframe
     }
 
     /**

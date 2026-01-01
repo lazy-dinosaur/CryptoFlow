@@ -1151,11 +1151,12 @@ kbd {
 .market-analysis-panel::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.25);
 }
+
 /* ========================================
    Visibility Toggles
    ======================================== */
 
-.market-analysis-panel, 
+.market-analysis-panel,
 #mlDashboard {
   transition: opacity 0.3s ease, transform 0.3s ease, visibility 0.3s;
   visibility: visible;
@@ -1206,4 +1207,180 @@ kbd {
   border-color: #00e676;
   color: #00e676;
   box-shadow: 0 0 5px rgba(0, 230, 118, 0.3);
+}
+
+/* ========================================
+   Settings Modal
+   ======================================== */
+.modal {
+  display: none;
+  position: fixed;
+  z-index: 1000;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  background-color: rgba(0, 0, 0, 0.8);
+  backdrop-filter: blur(5px);
+}
+
+.modal-content {
+  background-color: #1a1d21;
+  margin: 5% auto;
+  padding: 24px;
+  border: 1px solid #333;
+  width: 90%;
+  max-width: 500px;
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  color: #e0e0e0;
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid #333;
+  padding-bottom: 16px;
+  margin-bottom: 24px;
+}
+
+.modal-header h2 {
+  margin: 0;
+  color: #fff;
+  font-size: 1.25rem;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.close-modal {
+  color: #aaa;
+  font-size: 24px;
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 4px;
+  transition: color 0.2s;
+}
+
+.close-modal:hover {
+  color: #fff;
+}
+
+.settings-group {
+  margin-bottom: 24px;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 16px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.settings-group h3 {
+  margin-top: 0;
+  margin-bottom: 16px;
+  color: #64748b;
+  /* Neutral Light */
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-weight: 600;
+}
+
+.control-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.control-row:last-child {
+  margin-bottom: 0;
+}
+
+.control-row label {
+  flex: 1;
+  color: #ccc;
+  font-size: 0.9rem;
+}
+
+.control-row .controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* Switches */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 40px;
+  height: 22px;
+}
+
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.slider-switch {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: #333;
+  transition: .3s;
+  border-radius: 22px;
+}
+
+.slider-switch:before {
+  position: absolute;
+  content: "";
+  height: 16px;
+  width: 16px;
+  left: 3px;
+  bottom: 3px;
+  background-color: white;
+  transition: .3s;
+  border-radius: 50%;
+}
+
+input:checked+.slider-switch {
+  background-color: #3b82f6;
+  /* Accent Blue */
+}
+
+input:checked+.slider-switch:before {
+  transform: translateX(18px);
+}
+
+/* Range Stylings in Modal */
+.control-row input[type="range"] {
+  width: 120px;
+  height: 4px;
+  background: #333;
+  border-radius: 2px;
+  -webkit-appearance: none;
+}
+
+.control-row input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  background: #3b82f6;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.control-row .value-display {
+  font-family: monospace;
+  font-size: 0.85rem;
+  color: #3b82f6;
+  min-width: 40px;
+  text-align: right;
 }
