@@ -54,6 +54,8 @@ export class FootprintChart {
         // Profile Data
         this.sessionProfile = []; // { price, vol }
         this.pocPrice = 0;
+        this.vahPrice = 0; // Value Area High
+        this.valPrice = 0; // Value Area Low
         this.maxProfileVol = 0;
 
         // Heatmap controls
@@ -66,8 +68,8 @@ export class FootprintChart {
 
         // Thresholds
         // Heatmap defaults (Bookmap style)
-        this.heatmapIntensityThreshold = 0.005; // Show more detail (was 0.02)
-        this.heatmapOpacity = 0.8; // More solid/vibrant (was 0.5)
+        this.heatmapIntensityThreshold = 0.005; // Very low to handle extreme historical maxVol
+        this.heatmapOpacity = 0.8;
         this.maxVolumeInHistory = 5000; // Start high to avoid "Flash of Red" on load
         this.showBigTrades = true;
         this.bigTradeThreshold = 20.0; // User requested 20 default
@@ -85,6 +87,8 @@ export class FootprintChart {
         this.lastY = 0;
         this.dragStartX = 0;
         this.dragStartY = 0;
+
+        this.mlPrediction = null; // { prediction: 'win', confidence: 0.85 }
 
         // PRO COLORS
         this.colors = {
@@ -203,9 +207,20 @@ export class FootprintChart {
     setZoom(level) { this.zoomX = level; this.requestDraw(); }
     setBigTradeThreshold(val) { this.bigTradeThreshold = val; this.requestDraw(); }
     setBigTradeScale(val) { this.bigTradeScale = val; this.requestDraw(); } // New setter
+
+    setMLPrediction(result) {
+        this.mlPrediction = result; // { prediction: 'win', confidence: 0.85 }
+        this.requestDraw();
+    }
+
     setHeatmapIntensityThreshold(val) { this.heatmapIntensityThreshold = val; this.requestDraw(); }
     setHeatmapHistoryPercent(val) {
         this.heatmapHistoryPercent = Math.max(0, Math.min(100, val));
+        this.requestDraw();
+    }
+
+    setLiquidityLevels(levels) {
+        this.nakedLiquidityLevels = levels || [];
         this.requestDraw();
     }
 
@@ -282,9 +297,47 @@ export class FootprintChart {
         }
 
         // Convert to array for rendering
-        this.sessionProfile = Array.from(map.entries()).map(([price, vol]) => ({ price, vol }));
+        this.sessionProfile = Array.from(map.entries())
+            .map(([price, vol]) => ({ price, vol }))
+            .sort((a, b) => b.price - a.price); // Sort by price descending
         this.maxProfileVol = maxVol;
         this.pocPrice = poc;
+
+        // Calculate Value Area (70% of volume) - VAH and VAL
+        if (this.sessionProfile.length > 0) {
+            const totalVolume = this.sessionProfile.reduce((sum, level) => sum + level.vol, 0);
+            const valueAreaVolume = totalVolume * 0.7;
+
+            // Find POC index
+            let pocIndex = this.sessionProfile.findIndex(l => Math.abs(l.price - poc) < 0.0001);
+            if (pocIndex < 0) pocIndex = 0;
+
+            // Expand from POC to capture 70% volume
+            let vaVolume = this.sessionProfile[pocIndex].vol;
+            let vahIndex = pocIndex;
+            let valIndex = pocIndex;
+
+            while (vaVolume < valueAreaVolume && (vahIndex > 0 || valIndex < this.sessionProfile.length - 1)) {
+                const upperVol = vahIndex > 0 ? this.sessionProfile[vahIndex - 1].vol : 0;
+                const lowerVol = valIndex < this.sessionProfile.length - 1 ? this.sessionProfile[valIndex + 1].vol : 0;
+
+                if (upperVol >= lowerVol && vahIndex > 0) {
+                    vahIndex--;
+                    vaVolume += upperVol;
+                } else if (valIndex < this.sessionProfile.length - 1) {
+                    valIndex++;
+                    vaVolume += lowerVol;
+                } else {
+                    break;
+                }
+            }
+
+            this.vahPrice = this.sessionProfile[vahIndex]?.price || poc;
+            this.valPrice = this.sessionProfile[valIndex]?.price || poc;
+        } else {
+            this.vahPrice = poc;
+            this.valPrice = poc;
+        }
     }
 
     toggleHeatmap() { this.showHeatmap = !this.showHeatmap; this.requestDraw(); return this.showHeatmap; }
@@ -362,7 +415,10 @@ export class FootprintChart {
 
             // Wall Attack (Always On or toggle? User asked for it, lets keep it always on or tied to ML)
             // Let's tie it to 'showML' flag for now, or just always show if heavy wall nearby.
-            if (this.showML) this._drawWallAttack(ctx);
+            if (this.showML) {
+                this._drawWallAttack(ctx); // Existing HUD
+                this._drawTradePlan(ctx);  // NEW Trade Lines
+            }
 
         } catch (e) {
             console.error('Chart Render Error:', e);
@@ -417,6 +473,59 @@ export class FootprintChart {
             ctx.moveTo(width - profileWidth, pocY);
             ctx.lineTo(width, pocY);
             ctx.stroke();
+
+            // POC Label
+            ctx.font = 'bold 9px monospace';
+            ctx.fillStyle = '#fbbf24';
+            ctx.textAlign = 'right';
+            ctx.fillText('POC', width - profileWidth - 4, pocY + 3);
+        }
+
+        // Draw VAH Line (Value Area High) - dashed cyan
+        const vahY = this._getY(this.vahPrice);
+        if (this.vahPrice && vahY > 0 && vahY < height - deltaH) {
+            ctx.globalAlpha = 0.6;
+            ctx.strokeStyle = '#06b6d4'; // Cyan
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            ctx.moveTo(width - profileWidth, vahY);
+            ctx.lineTo(width, vahY);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // VAH Label
+            ctx.font = 'bold 9px monospace';
+            ctx.fillStyle = '#06b6d4';
+            ctx.textAlign = 'right';
+            ctx.fillText('VAH', width - profileWidth - 4, vahY + 3);
+        }
+
+        // Draw VAL Line (Value Area Low) - dashed magenta
+        const valY = this._getY(this.valPrice);
+        if (this.valPrice && valY > 0 && valY < height - deltaH) {
+            ctx.globalAlpha = 0.6;
+            ctx.strokeStyle = '#d946ef'; // Magenta
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            ctx.moveTo(width - profileWidth, valY);
+            ctx.lineTo(width, valY);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // VAL Label
+            ctx.font = 'bold 9px monospace';
+            ctx.fillStyle = '#d946ef';
+            ctx.textAlign = 'right';
+            ctx.fillText('VAL', width - profileWidth - 4, valY + 3);
+        }
+
+        // Draw Value Area shading
+        if (this.vahPrice && this.valPrice && vahY > 0 && valY < height - deltaH) {
+            ctx.globalAlpha = 0.05;
+            ctx.fillStyle = '#fbbf24';
+            ctx.fillRect(width - profileWidth, vahY, profileWidth, valY - vahY);
         }
 
         ctx.restore();
@@ -444,39 +553,72 @@ export class FootprintChart {
         // Start search pointer
         let hPtr = 0;
         const hLen = this.heatmapData.length;
+        const totalCandles = this.candles.length;
+        const isLiveCandle = (i) => i === totalCandles - 1; // The rightmost forming candle
 
         for (let i = startIdx; i <= endIdx; i++) {
             // Find candle
-            if (i < 0 || i >= this.candles.length) continue;
+            if (i < 0 || i >= totalCandles) continue;
             const candle = this.candles[i];
             if (!candle) continue;
 
             const cTime = candle.time;
 
-            // Find best matching snapshot: The one closest to candle.time (or simply the last one before next candle)
-            // Since both arrays are time-sorted, we can advance hPtr.
-
             let snapshot = null;
+            let levels = []; // Move levels array declaration here
 
-            // Limit search window to reasonable proximity (e.g. within 2x timeframe)
-            // But simplify: just find the snapshot with time >= cTime and < next_candle_time
-            // Or just closest.
+            // FIX: Use latest snapshot for ALL candles after the last historical snapshot time
+            // This ensures heatmap extends to the live edge continuously
+            const lastHistoricalTime = hLen > 0 ? this.heatmapData[hLen - 1].time : 0;
 
-            // 1. Advance hPtr until we reach/pass cTime
-            while (hPtr < hLen - 1 && this.heatmapData[hPtr].time < cTime) {
-                hPtr++;
+            // Check if this candle's time is AFTER or NEAR the last snapshot
+            // Use a buffer of 2 minutes to catch any timing gaps
+            const timeBuffer = 2 * 60 * 1000; // 2 minutes in ms
+
+            if (cTime >= lastHistoricalTime - timeBuffer && hLen > 0) {
+                // LIVE CANDLE: Combine levels from last 60 snapshots for broader price coverage
+                // This ensures the heatmap shows similar depth as historical data
+                const snapshotsToMerge = Math.min(60, hLen);
+                const seenPrices = new Set();
+
+                for (let s = hLen - snapshotsToMerge; s < hLen; s++) {
+                    if (s < 0) continue;
+                    const snap = this.heatmapData[s];
+                    if (snap.bids) {
+                        for (const b of snap.bids) {
+                            const key = b.p.toFixed(1);
+                            if (!seenPrices.has(key)) {
+                                seenPrices.add(key);
+                                levels.push({ p: b.p, q: b.q });
+                            }
+                        }
+                    }
+                    if (snap.asks) {
+                        for (const a of snap.asks) {
+                            const key = a.p.toFixed(1);
+                            if (!seenPrices.has(key)) {
+                                seenPrices.add(key);
+                                levels.push({ p: a.p, q: a.q });
+                            }
+                        }
+                    }
+                }
+                snapshot = this.heatmapData[hLen - 1]; // For timestamp logging
+            } else {
+                // Older candles: Find best matching snapshot by time
+                while (hPtr < hLen - 1 && this.heatmapData[hPtr].time < cTime) {
+                    hPtr++;
+                }
+                snapshot = this.heatmapData[hPtr];
+
+                // Use levels from single historical snapshot
+                if (snapshot) {
+                    if (snapshot.bids) for (const b of snapshot.bids) levels.push({ p: b.p, q: b.q });
+                    if (snapshot.asks) for (const a of snapshot.asks) levels.push({ p: a.p, q: a.q });
+                }
             }
 
-            // Now heatmapData[hPtr] is likely >= cTime. 
-            // We want the snapshot representing this candle's duration. 
-            // Ideally, we'd average them? For performance, let's take the one at 'Close' (latest in duration)
-            // Actually, if we just take the one at 'Open' (hPtr), it's stable.
-            // Let's check the next one too.
-
-            // Stabilize: Use the snapshot closest to the candle time.
-            snapshot = this.heatmapData[hPtr];
-
-            // Fallback for live edge: If no snapshot found (future?), use last available?
+            // Fallback if still no snapshot
             if (!snapshot && hLen > 0) snapshot = this.heatmapData[hLen - 1];
 
             if (!snapshot) continue;
@@ -485,30 +627,29 @@ export class FootprintChart {
             const x = this._getX(i);
             const w = this.zoomX;
 
-            let levels = [];
-            if (snapshot.bids) for (const b of snapshot.bids) levels.push({ p: b.p, q: b.q });
-            if (snapshot.asks) for (const a of snapshot.asks) levels.push({ p: a.p, q: a.q });
+            let drawnCount = 0; // Count levels actually drawn
 
             for (const lev of levels) {
                 if (!lev.p || !lev.q) continue;
                 const y = this._getY(lev.p);
                 const h = Math.max(1, (this.zoomY));
 
-                if (y + h < 0 || y > height - deltaH) continue;
+                // Expanded Y-range: Show levels slightly outside visible area (extend by 500px each direction)
+                if (y + h < -500 || y > height - deltaH + 500) continue;
 
-                // 1. Noise Filter: Ignore < 2% of max volume (cleans up "Blue Rain")
-                // 1. Threshold Filter (Controlled by Slider)
+                // Threshold Filter (Controlled by Slider)
                 const ratio = lev.q / this.maxVolumeInHistory;
-                if (ratio < this.heatmapIntensityThreshold) continue; // Slider Control Only
+                if (ratio < this.heatmapIntensityThreshold) continue;
+
+                drawnCount++;
 
                 // BOOKMAP STYLE: Gamma Corrected Opacity
                 const visRatio = Math.pow(ratio, 0.4);
 
                 let color;
-                const alpha = this.heatmapOpacity; // Default 1.0 or user setting?
+                const alpha = this.heatmapOpacity;
 
                 if (visRatio < 0.2) {
-                    // Very Low (Dark Blue) - Make it more transparent
                     color = `rgba(0, 50, 200, ${alpha * 0.4})`;
                 } else if (visRatio < 0.4) {
                     color = `rgba(0, 150, 255, ${alpha * 0.6})`;
@@ -517,12 +658,16 @@ export class FootprintChart {
                 } else if (visRatio < 0.8) {
                     color = `rgba(255, 255, 0, ${alpha})`;
                 } else {
-                    color = `rgba(255, 0, 0, ${alpha})`; // MAX Heat
+                    color = `rgba(255, 0, 0, ${alpha})`;
                 }
 
                 bufCtx.fillStyle = color;
-                // +1 width to prevent vertical gaps between candles
                 bufCtx.fillRect(x, y - h / 2, w + 1, h);
+            }
+
+            // Log ONLY for live candle to reduce spam
+            if (isLiveCandle(i)) {
+                console.log(`[Live Candle ${i}] Snapshot time: ${snapshot.time}, Total levels: ${levels.length}, Drawn: ${drawnCount}, MaxVol: ${this.maxVolumeInHistory}`);
             }
         }
         ctx.drawImage(this.heatmapBuffer, 0, 0);
@@ -1025,6 +1170,9 @@ export class FootprintChart {
             const baseRadius = 3 + Math.log(relVol) * 3;
             const radius = Math.max(2, Math.min(30, baseRadius * this.bigTradeScale)); // Apply Scale
 
+            // Validate all values are finite before creating gradient
+            if (!isFinite(x) || !isFinite(y) || !isFinite(radius) || radius <= 0) continue;
+
             // 3D Sphere Effect (Radial Gradient)
             const gradient = ctx.createRadialGradient(
                 x - radius * 0.3, y - radius * 0.3, radius * 0.1, // Highlight offset
@@ -1063,120 +1211,671 @@ export class FootprintChart {
 
 
 
+    /**
+     * ADVANCED LIQUIDITY INTELLIGENCE SYSTEM
+     * Features:
+     * - Wall Absorption Tracking (size changes over time)
+     * - Spoofing Detection (sudden wall disappearance)
+     * - Wall Clustering (group nearby walls into zones)
+     * - Delta Integration (order flow direction)
+     * - Momentum Factor (recent trades weighted more)
+     * - Modern Glassmorphism UI
+     */
     _drawWallAttack(ctx) {
         if (!this.heatmapData || !this.currentPrice || !this.candles.length) return;
 
-        // 1. FIND THE WALL
-        // Look usage latest snapshot
+        const now = Date.now();
         const snapshot = this.heatmapData[this.heatmapData.length - 1];
         if (!snapshot) return;
 
-        // Define "Wall" as > 10% of max volume (Lowered for visibility)
-        const wallThreshold = Math.max(5, this.maxVolumeInHistory * 0.1);
+        // Initialize wall tracker if needed
+        if (!this._wallTracker) {
+            this._wallTracker = new Map(); // price -> wall data
+            this._spoofAlerts = [];
+        }
 
-        // Search visible range
+        // Reset wall zones for hover detection
+        this._wallZones = [];
+
+        // ===============================
+        // 1. SCAN & CLUSTER WALLS
+        // ===============================
+        // Much lower threshold to detect more walls (10 BTC max)
+        const wallThreshold = Math.min(10, Math.max(3, this.maxVolumeInHistory * 0.01));
         const viewMin = this._getPriceFromY(this.height - this._deltaH());
         const viewMax = this._getPriceFromY(0);
+        const CLUSTER_RANGE = 100; // $100 clustering
 
-        let nearestWall = null;
-        let minDist = Infinity;
+        // Debug: Log threshold
+        if (!this._lastThresholdLog || Date.now() - this._lastThresholdLog > 5000) {
+            console.log(`[Liquidity] Threshold: ${wallThreshold.toFixed(1)} BTC, MaxVol: ${this.maxVolumeInHistory?.toFixed(1)}`);
+            this._lastThresholdLog = Date.now();
+        }
 
-        const scan = (levels, type) => {
+        // Collect all significant walls
+        const rawWalls = [];
+        const scanWalls = (levels, type) => {
             if (!levels) return;
             for (const l of levels) {
-                if (l.p < viewMin || l.p > viewMax) continue; // Skip off-screen
+                if (l.p < viewMin || l.p > viewMax) continue;
                 if (l.q >= wallThreshold) {
-                    const dist = Math.abs(l.p - this.currentPrice);
-                    if (dist < minDist) {
-                        minDist = dist;
-                        nearestWall = { ...l, type };
-                    }
+                    rawWalls.push({ price: l.p, size: l.q, type });
                 }
             }
         };
-        scan(snapshot.bids, 'bid');
-        scan(snapshot.asks, 'ask');
+        scanWalls(snapshot.bids, 'bid');
+        scanWalls(snapshot.asks, 'ask');
 
-        if (!nearestWall) {
-            // Draw "Scanning" status so user knows it's on
-            ctx.font = 'bold 11px "Inter", sans-serif';
-            ctx.fillStyle = '#666';
-            ctx.textAlign = 'right';
-            ctx.fillText('SCANNING FOR WALLS...', this.width - 20, 30);
+        // Cluster nearby walls into zones
+        const zones = [];
+        const usedWalls = new Set();
+
+        for (const wall of rawWalls) {
+            if (usedWalls.has(wall.price)) continue;
+
+            // Find all walls within cluster range
+            const cluster = rawWalls.filter(w =>
+                !usedWalls.has(w.price) &&
+                w.type === wall.type &&
+                Math.abs(w.price - wall.price) <= CLUSTER_RANGE
+            );
+
+            if (cluster.length > 0) {
+                const totalSize = cluster.reduce((sum, w) => sum + w.size, 0);
+                const avgPrice = cluster.reduce((sum, w) => sum + w.price * w.size, 0) / totalSize;
+                const minPrice = Math.min(...cluster.map(w => w.price));
+                const maxPrice = Math.max(...cluster.map(w => w.price));
+
+                zones.push({
+                    priceMin: minPrice,
+                    priceMax: maxPrice,
+                    avgPrice: avgPrice,
+                    totalSize: totalSize,
+                    wallCount: cluster.length,
+                    type: wall.type
+                });
+
+                cluster.forEach(w => usedWalls.add(w.price));
+            }
+        }
+
+        // ===============================
+        // WALL PERSISTENCE SCORING SYSTEM
+        // Instead of just "exists now or not", we track:
+        // - How often the wall was seen in the last 30 seconds
+        // - persistence = samples_seen / total_samples
+        // - Only show walls with >50% persistence (stable walls)
+        // ===============================
+        const wallNow = Date.now();
+        const TRACKING_WINDOW = 30000; // 30 seconds
+        const SAMPLE_INTERVAL = 1000;  // Sample every 1 second
+        const MIN_PERSISTENCE = 0.5;   // 50% presence required
+        const FADEOUT_TIME = 15000;    // 15 seconds fade-out after dropping below threshold
+
+        if (!this._wallHistory) this._wallHistory = new Map();
+
+        // Update wall history with current zones
+        const currentZoneKeys = new Set();
+        for (const zone of zones) {
+            const key = `${zone.type}_${Math.round(zone.avgPrice / 200) * 200}`; // $200 buckets
+            currentZoneKeys.add(key);
+
+            if (!this._wallHistory.has(key)) {
+                // New wall - start tracking
+                this._wallHistory.set(key, {
+                    firstSeen: wallNow,
+                    lastSeen: wallNow,
+                    zone: zone,
+                    samples: [wallNow], // Array of timestamps when seen
+                    qualified: false,   // Has met persistence threshold
+                    qualifiedTime: null
+                });
+            } else {
+                // Update existing - add sample if enough time passed
+                const entry = this._wallHistory.get(key);
+                entry.lastSeen = wallNow;
+                entry.zone = zone;
+
+                // Add sample if > SAMPLE_INTERVAL since last sample
+                const lastSample = entry.samples[entry.samples.length - 1];
+                if (wallNow - lastSample >= SAMPLE_INTERVAL) {
+                    entry.samples.push(wallNow);
+                }
+
+                // Clean old samples outside tracking window
+                entry.samples = entry.samples.filter(t => wallNow - t < TRACKING_WINDOW);
+            }
+        }
+
+        // Calculate persistence and build validated zones list
+        const validatedZones = [];
+        for (const [key, entry] of this._wallHistory) {
+            const timeSinceLastSeen = wallNow - entry.lastSeen;
+            const trackingDuration = Math.min(TRACKING_WINDOW, wallNow - entry.firstSeen);
+
+            // Remove very old entries
+            if (timeSinceLastSeen > FADEOUT_TIME && !entry.qualified) {
+                this._wallHistory.delete(key);
+                continue;
+            }
+
+            // Calculate persistence score
+            const expectedSamples = Math.max(1, Math.floor(trackingDuration / SAMPLE_INTERVAL));
+            const actualSamples = entry.samples.length;
+            const persistence = Math.min(1, actualSamples / expectedSamples);
+
+            // Check if meets persistence threshold
+            const isActive = currentZoneKeys.has(key);
+
+            if (persistence >= MIN_PERSISTENCE) {
+                if (!entry.qualified) {
+                    entry.qualified = true;
+                    entry.qualifiedTime = wallNow;
+                }
+            }
+
+            // Only show qualified walls
+            if (!entry.qualified) continue;
+
+            // If qualified but now inactive/low persistence, start fade-out
+            let opacity = 1.0;
+            if (!isActive || persistence < MIN_PERSISTENCE) {
+                const timeSinceFail = timeSinceLastSeen;
+                opacity = Math.max(0.3, 1 - (timeSinceFail / FADEOUT_TIME));
+
+                // Remove if fully faded
+                if (opacity <= 0.3 && timeSinceFail > FADEOUT_TIME) {
+                    this._wallHistory.delete(key);
+                    continue;
+                }
+            }
+
+            validatedZones.push({
+                ...entry.zone,
+                opacity: opacity,
+                persistence: persistence,
+                isActive: isActive,
+                ageSeconds: Math.round((wallNow - entry.firstSeen) / 1000)
+            });
+        }
+
+        // Find nearest zone to current price
+        let activeZone = null;
+        let minDist = Infinity;
+        for (const zone of zones) {
+            const dist = Math.abs(zone.avgPrice - this.currentPrice);
+            if (dist < minDist) {
+                minDist = dist;
+                activeZone = zone;
+            }
+        }
+
+        // ===============================
+        // 2. WALL ABSORPTION TRACKING
+        // ===============================
+        if (activeZone) {
+            const zoneKey = `${activeZone.type}_${Math.round(activeZone.avgPrice / 10) * 10}`;
+            let tracked = this._wallTracker.get(zoneKey);
+
+            if (!tracked) {
+                // New zone - start tracking
+                tracked = {
+                    initialSize: activeZone.totalSize,
+                    currentSize: activeZone.totalSize,
+                    firstSeen: wallNow,
+                    lastUpdate: now,
+                    history: [{ time: now, size: activeZone.totalSize }],
+                    absorbed: 0,
+                    absorptionRate: 0,
+                    isSpoof: false,
+                    spoofTime: null
+                };
+                this._wallTracker.set(zoneKey, tracked);
+            } else {
+                // Update existing tracking
+                const prevSize = tracked.currentSize;
+                tracked.currentSize = activeZone.totalSize;
+                tracked.lastUpdate = now;
+
+                // Track history (keep last 60 seconds)
+                tracked.history.push({ time: now, size: activeZone.totalSize });
+                tracked.history = tracked.history.filter(h => now - h.time < 60000);
+
+                // Calculate absorption
+                tracked.absorbed = Math.max(0, tracked.initialSize - tracked.currentSize);
+
+                // Calculate absorption rate (BTC/min)
+                const timeElapsed = (now - tracked.firstSeen) / 60000; // minutes
+                tracked.absorptionRate = timeElapsed > 0 ? tracked.absorbed / timeElapsed : 0;
+
+                // SPOOFING DETECTION: >50% drop in <2 seconds
+                if (prevSize > 0 && tracked.currentSize < prevSize * 0.5) {
+                    const timeDiff = now - (tracked.history[tracked.history.length - 2]?.time || now);
+                    if (timeDiff < 2000) {
+                        tracked.isSpoof = true;
+                        tracked.spoofTime = now;
+                        this._spoofAlerts.push({ time: now, price: activeZone.avgPrice, type: activeZone.type });
+                    }
+                }
+
+                // Clear spoof flag after 10 seconds
+                if (tracked.isSpoof && now - tracked.spoofTime > 10000) {
+                    tracked.isSpoof = false;
+                }
+            }
+
+            activeZone.tracked = tracked;
+        }
+
+        // Clean old spoof alerts
+        this._spoofAlerts = this._spoofAlerts.filter(a => now - a.time < 30000);
+
+        // ===============================
+        // DRAW WALL MARKERS ON PRICE AXIS
+        // ===============================
+        const markerX = this.width - 55;
+        const markerWidth = 50;
+        const markerHeight = 16;
+
+        // Use VALIDATED zones (confirmed + fade-out)
+        for (const zone of validatedZones) {
+            const zoneY = this._getY(zone.avgPrice);
+            if (zoneY < 0 || zoneY > this.height - this._deltaH()) continue;
+
+            const isAsk = zone.type === 'ask';
+            const baseColor = isAsk ? '#ef4444' : '#10b981';
+            const opacity = zone.opacity || 1.0;
+            const persistence = zone.persistence || 0;
+            const ageSeconds = zone.ageSeconds || 0;
+
+            // Size-based marker height (bigger wall = taller marker)
+            const sizeNormalized = Math.min(1, zone.totalSize / 50); // Cap at 50 BTC
+            const dynamicHeight = 14 + sizeNormalized * 12; // 14-26px based on size
+
+            // Price distance factor (closer to current price = more prominent)
+            const distFromPrice = Math.abs(zone.avgPrice - this.currentPrice);
+            const distFactor = Math.max(0.5, 1 - distFromPrice / 2000); // Fade if >$2000 away
+
+            // Store zone bounds for click detection
+            zone.markerY = zoneY;
+            zone.markerX = markerX;
+            zone.markerWidth = markerWidth;
+            zone.markerHeight = dynamicHeight;
+            this._wallZones.push(zone);
+
+            ctx.globalAlpha = opacity * distFactor;
+
+            // Draw main marker pill
+            ctx.fillStyle = baseColor + '30';
+            ctx.strokeStyle = baseColor;
+            ctx.lineWidth = zone.isActive ? 2 : 1;
+            ctx.beginPath();
+            ctx.roundRect(markerX, zoneY - dynamicHeight / 2, markerWidth, dynamicHeight, 4);
+            ctx.fill();
+            ctx.stroke();
+
+            // Draw persistence bar at bottom of marker
+            const barWidth = markerWidth - 6;
+            const barHeight = 3;
+            const barY = zoneY + dynamicHeight / 2 - barHeight - 2;
+            const barX = markerX + 3;
+
+            // Background bar
+            ctx.fillStyle = 'rgba(0,0,0,0.3)';
+            ctx.fillRect(barX, barY, barWidth, barHeight);
+
+            // Filled bar based on persistence
+            const persistColor = persistence > 0.8 ? '#22c55e' : persistence > 0.5 ? '#eab308' : '#ef4444';
+            ctx.fillStyle = persistColor;
+            ctx.fillRect(barX, barY, barWidth * persistence, barHeight);
+
+            // Draw size text
+            ctx.font = 'bold 9px monospace';
+            ctx.fillStyle = baseColor;
+            ctx.textAlign = 'center';
+            const sizeText = zone.totalSize >= 100 ? `${zone.totalSize.toFixed(0)}` : zone.totalSize.toFixed(1);
+            ctx.fillText(sizeText, markerX + markerWidth / 2, zoneY - 1);
+
+            // Draw age in smaller text
+            ctx.font = '7px sans-serif';
+            ctx.fillStyle = 'rgba(255,255,255,0.6)';
+            const ageText = ageSeconds >= 60 ? `${Math.floor(ageSeconds / 60)}m` : `${ageSeconds}s`;
+            ctx.fillText(ageText, markerX + markerWidth / 2, zoneY + 8);
+
+            // Draw status icon
+            const icon = zone.isActive ? '🛡️' : '👻';
+            ctx.font = '8px sans-serif';
+            ctx.fillText(icon, markerX + 8, zoneY - dynamicHeight / 2 + 8);
+
+            ctx.globalAlpha = 1.0; // Reset
+        }
+
+        // Debug: Log zones found
+        if (!this._lastZoneLog || Date.now() - this._lastZoneLog > 5000) {
+            const activeCount = validatedZones.filter(z => z.isActive).length;
+            const avgPersistence = validatedZones.length > 0
+                ? (validatedZones.reduce((s, z) => s + z.persistence, 0) / validatedZones.length * 100).toFixed(0)
+                : 0;
+            console.log(`[Liquidity] Raw: ${zones.length}, Qualified: ${validatedZones.length} (${activeCount} active), Avg Persistence: ${avgPersistence}%`);
+            this._lastZoneLog = Date.now();
+        }
+
+        // CLICK-BASED SELECTION: HUD only shows when user clicks on a marker
+        // (No more auto-jumping between walls!)
+        let activeZoneForHUD = null;
+
+        if (this._selectedWallPrice) {
+            // Find the zone matching selected price (in validated zones)
+            activeZoneForHUD = validatedZones.find(z => Math.abs(z.avgPrice - this._selectedWallPrice) < 100);
+
+            // If selected wall no longer exists (faded out), clear selection
+            if (!activeZoneForHUD) {
+                this._selectedWallPrice = null;
+            }
+        }
+
+        if (!activeZoneForHUD) {
+            // Show hint to click on markers
+            if (validatedZones.length > 0) {
+                ctx.font = 'bold 10px sans-serif';
+                ctx.fillStyle = 'rgba(255,255,255,0.5)';
+                ctx.textAlign = 'right';
+                ctx.fillText(`🛡️ ${validatedZones.length} walls - click marker for details`, this.width - 60, 20);
+            }
             return;
         }
 
-        // 2. CALCULATE ATTACK STATS
-        // How much volume happened at this price in the last few candles?
+        // Use selected zone
+        activeZone = activeZoneForHUD;
+
+        // ===============================
+        // 3. CALCULATE DELTA & MOMENTUM
+        // ===============================
+        let netDelta = 0;
         let attackVol = 0;
-        const targetPrice = nearestWall.p;
-        const tick = this.tickSize;
+        let momentumVol = 0;
 
-        // Look back last 5 candles
-        for (let i = this.candles.length - 1; i >= Math.max(0, this.candles.length - 5); i--) {
-            const c = this.candles[i];
-            if (!c || !c.clusters) continue;
+        if (activeZone) {
+            const tick = this.tickSize;
+            const lookback = 10; // candles
 
-            // Extract cluster
-            let clusters = c.clusters instanceof Map ? Array.from(c.clusters.entries()) : Object.entries(c.clusters).map(([p, d]) => [parseFloat(p), d]);
+            for (let i = this.candles.length - 1; i >= Math.max(0, this.candles.length - lookback); i--) {
+                const c = this.candles[i];
+                if (!c || !c.clusters) continue;
 
-            for (const [p, vol] of clusters) {
-                if (Math.abs(p - targetPrice) < tick * 1.5) { // Close enough
-                    // If attacking ASK wall (Resistance), use BID volume (Real Buys in inverted logic)
-                    if (nearestWall.type === 'ask') attackVol += (vol.bid || 0);
-                    // If attacking BID wall (Support), use ASK volume (Real Sells in inverted logic)
-                    else attackVol += (vol.ask || 0);
+                const age = this.candles.length - 1 - i;
+                const timeWeight = Math.exp(-age / 5); // Exponential decay
+
+                // Delta calculation
+                const candleDelta = (c.buyVolume || 0) - (c.sellVolume || 0);
+                netDelta += candleDelta * timeWeight;
+
+                // Attack volume at wall price
+                let clusters = c.clusters instanceof Map
+                    ? Array.from(c.clusters.entries())
+                    : Object.entries(c.clusters).map(([p, d]) => [parseFloat(p), d]);
+
+                for (const [p, vol] of clusters) {
+                    if (p >= activeZone.priceMin - tick && p <= activeZone.priceMax + tick) {
+                        const volAtPrice = activeZone.type === 'ask'
+                            ? (vol.bid || 0)
+                            : (vol.ask || 0);
+                        attackVol += volAtPrice;
+                        momentumVol += volAtPrice * timeWeight;
+                    }
                 }
             }
         }
 
-        // 3. PROBABILITY MATH
-        // Simple: Attack / Wall
-        // Advanced: Add momentum factor?
-        const ratio = Math.min(1, attackVol / nearestWall.q);
-        const probability = ratio * 100;
+        // ===============================
+        // 4. CALCULATE BREAK PROBABILITY
+        // ===============================
+        let probability = 0;
+        let confidenceLevel = 'LOW';
 
-        // 4. DRAW HUD
-        const y = this._getY(nearestWall.p);
-        const x = this.width - 220; // Right aligned
+        if (activeZone) {
+            const tracked = activeZone.tracked;
 
-        if (y < 0 || y > this.height - this._deltaH()) return;
+            // Base probability: Attack / Wall
+            const baseProb = Math.min(1, attackVol / activeZone.totalSize);
 
-        // Box
-        ctx.fillStyle = 'rgba(10,10,10, 0.85)';
-        ctx.strokeStyle = nearestWall.type === 'ask' ? '#ef4444' : '#10b981';
-        ctx.lineWidth = 2;
+            // Absorption factor (wall getting weaker)
+            const absorptionFactor = tracked ? Math.min(0.3, (tracked.absorbed / tracked.initialSize) * 0.5) : 0;
+
+            // Delta factor (momentum in right direction)
+            let deltaFactor = 0;
+            if (activeZone.type === 'ask' && netDelta > 0) deltaFactor = Math.min(0.2, netDelta / 100 * 0.01);
+            if (activeZone.type === 'bid' && netDelta < 0) deltaFactor = Math.min(0.2, Math.abs(netDelta) / 100 * 0.01);
+
+            // Spoof penalty
+            const spoofPenalty = tracked?.isSpoof ? -0.3 : 0;
+
+            // Momentum factor
+            const momentumFactor = attackVol > 0 ? Math.min(0.15, (momentumVol / attackVol - 0.5) * 0.3) : 0;
+
+            probability = Math.max(0, Math.min(100, (baseProb + absorptionFactor + deltaFactor + momentumFactor + spoofPenalty) * 100));
+
+            // Confidence level
+            if (probability > 70 && tracked && tracked.absorptionRate > 5) confidenceLevel = 'HIGH';
+            else if (probability > 40) confidenceLevel = 'MED';
+            else confidenceLevel = 'LOW';
+        }
+
+        // ===============================
+        // 5. STICKY DISPLAY (prevent flickering)
+        // ===============================
+        const STICKY_DURATION = 3000;
+
+        if (activeZone) {
+            if (!this._stickyZone ||
+                !this._stickyZoneTime ||
+                (now - this._stickyZoneTime > STICKY_DURATION) ||
+                (Math.abs(activeZone.avgPrice - this._stickyZone.avgPrice) < 50)) {
+                this._stickyZone = activeZone;
+                this._stickyZoneTime = now;
+                this._stickyProbability = probability;
+                this._stickyDelta = netDelta;
+                this._stickyConfidence = confidenceLevel;
+            }
+        } else if (this._stickyZone && (now - this._stickyZoneTime < STICKY_DURATION)) {
+            activeZone = this._stickyZone;
+            probability = this._stickyProbability;
+            netDelta = this._stickyDelta;
+            confidenceLevel = this._stickyConfidence;
+        }
+
+        // ===============================
+        // 6. DRAW MODERN HUD
+        // ===============================
+        if (!activeZone) {
+            ctx.font = 'bold 11px sans-serif';
+            ctx.fillStyle = 'rgba(255,255,255,0.4)';
+            ctx.textAlign = 'right';
+            ctx.fillText('🔍 SCANNING LIQUIDITY...', this.width - 10, 20);
+            return;
+        }
+
+        const tracked = activeZone.tracked;
+
+        // FIXED POSITION: Top-right corner (prevents flickering)
+        const cardWidth = 240;
+        const cardHeight = 130;
+        const x = this.width - 310; // Left of price axis
+        const y = 30; // Fixed at top
+
+        // Wall Y for connection line
+        const wallY = this._getY(activeZone.avgPrice);
+
+        // Card Background (Glassmorphism)
+        const isAsk = activeZone.type === 'ask';
+        const baseColor = isAsk ? 'rgba(239, 68, 68, 0.15)' : 'rgba(16, 185, 129, 0.15)';
+        const borderColor = isAsk ? '#ef4444' : '#10b981';
+
+        ctx.fillStyle = baseColor;
+        ctx.strokeStyle = tracked?.isSpoof ? '#f59e0b' : borderColor;
+        ctx.lineWidth = tracked?.isSpoof ? 3 : 2;
         ctx.beginPath();
-        ctx.roundRect(x, y - 25, 200, 50, 8);
+        ctx.roundRect(x, y - 20, cardWidth, cardHeight, 12);
         ctx.fill();
         ctx.stroke();
 
-        // Title
-        ctx.font = 'bold 12px "Inter", sans-serif';
+        // Inner gradient overlay
+        const gradient = ctx.createLinearGradient(x, y, x, y + cardHeight);
+        gradient.addColorStop(0, 'rgba(0,0,0,0.6)');
+        gradient.addColorStop(1, 'rgba(0,0,0,0.8)');
+        ctx.fillStyle = gradient;
+        ctx.beginPath();
+        ctx.roundRect(x + 2, y - 18, cardWidth - 4, cardHeight - 4, 10);
+        ctx.fill();
+
+        // Title Row
+        ctx.font = 'bold 13px "Inter", sans-serif';
         ctx.fillStyle = '#fff';
         ctx.textAlign = 'left';
-        ctx.fillText(`${nearestWall.type === 'ask' ? '🛡️ RESISTANCE' : '🛡️ SUPPORT'}`, x + 10, y - 5);
+        const title = activeZone.wallCount > 1
+            ? `🛡️ ${isAsk ? 'RESISTANCE' : 'SUPPORT'} ZONE`
+            : `🛡️ ${isAsk ? 'RESISTANCE' : 'SUPPORT'}`;
+        ctx.fillText(title, x + 12, y);
 
-        // Stats
-        ctx.font = '11px monospace';
+        // Spoof Warning
+        if (tracked?.isSpoof) {
+            ctx.fillStyle = '#f59e0b';
+            ctx.textAlign = 'right';
+            ctx.fillText('⚠️ SPOOF RISK', x + cardWidth - 12, y);
+        }
+
+        // Price Range
+        ctx.font = '10px monospace';
+        ctx.fillStyle = '#888';
+        ctx.textAlign = 'left';
+        const priceText = activeZone.wallCount > 1
+            ? `$${activeZone.priceMin.toFixed(0)} - $${activeZone.priceMax.toFixed(0)}`
+            : `$${activeZone.avgPrice.toFixed(1)}`;
+        ctx.fillText(priceText, x + 12, y + 14);
+
+        // Wall Stats Row
+        ctx.font = '11px "Inter", sans-serif';
         ctx.fillStyle = '#aaa';
-        ctx.fillText(`Wall: ${nearestWall.q.toFixed(0)} | Hit: ${attackVol.toFixed(0)}`, x + 10, y + 15);
-
-        // Probability
+        const wallText = `WALL: ${activeZone.totalSize.toFixed(0)} BTC`;
+        const absorbedText = tracked ? `ABSORBED: ${tracked.absorbed.toFixed(0)}` : '';
+        ctx.fillText(wallText, x + 12, y + 32);
         ctx.textAlign = 'right';
-        ctx.font = 'bold 16px sans-serif';
+        ctx.fillText(absorbedText, x + cardWidth - 12, y + 32);
 
-        // Color based on prob
-        let probColor = '#ef4444'; // Low
-        if (probability > 40) probColor = '#fbbf24'; // Med
-        if (probability > 75) probColor = '#10b981'; // High
+        // Absorption Progress Bar
+        if (tracked && tracked.initialSize > 0) {
+            const barX = x + 12;
+            const barY = y + 40;
+            const barWidth = cardWidth - 24;
+            const barHeight = 8;
+            const absorptionRatio = Math.min(1, tracked.absorbed / tracked.initialSize);
 
+            // Background
+            ctx.fillStyle = 'rgba(255,255,255,0.1)';
+            ctx.beginPath();
+            ctx.roundRect(barX, barY, barWidth, barHeight, 4);
+            ctx.fill();
+
+            // Progress
+            const progressGradient = ctx.createLinearGradient(barX, 0, barX + barWidth * absorptionRatio, 0);
+            progressGradient.addColorStop(0, '#10b981');
+            progressGradient.addColorStop(0.5, '#fbbf24');
+            progressGradient.addColorStop(1, '#ef4444');
+            ctx.fillStyle = progressGradient;
+            ctx.beginPath();
+            ctx.roundRect(barX, barY, barWidth * absorptionRatio, barHeight, 4);
+            ctx.fill();
+
+            // Percentage
+            ctx.font = 'bold 10px monospace';
+            ctx.fillStyle = '#fff';
+            ctx.textAlign = 'right';
+            ctx.fillText(`${(absorptionRatio * 100).toFixed(0)}%`, barX + barWidth, barY + barHeight + 12);
+        }
+
+        // Stats Row 2
+        const statsY = y + 68;
+        ctx.font = '10px "Inter", sans-serif';
+        ctx.textAlign = 'left';
+
+        // Absorption Rate
+        ctx.fillStyle = '#6ee7b7';
+        ctx.fillText(`⚡ ${tracked?.absorptionRate.toFixed(1) || '0.0'} BTC/min`, x + 12, statsY);
+
+        // Delta
+        const deltaColor = netDelta > 0 ? '#10b981' : netDelta < 0 ? '#ef4444' : '#888';
+        const deltaArrow = netDelta > 0 ? '↑' : netDelta < 0 ? '↓' : '→';
+        ctx.fillStyle = deltaColor;
+        ctx.fillText(`📊 ${deltaArrow}${Math.abs(netDelta).toFixed(0)} Δ`, x + 100, statsY);
+
+        // Time at wall
+        const timeAtWall = tracked ? Math.round((now - tracked.firstSeen) / 1000) : 0;
+        const mins = Math.floor(timeAtWall / 60);
+        const secs = timeAtWall % 60;
+        ctx.fillStyle = '#888';
+        ctx.textAlign = 'right';
+        ctx.fillText(`⏱️ ${mins}:${secs.toString().padStart(2, '0')}`, x + cardWidth - 12, statsY);
+
+        // Break Probability Section
+        const probY = y + 90;
+
+        // Probability background bar
+        ctx.fillStyle = 'rgba(255,255,255,0.05)';
+        ctx.beginPath();
+        ctx.roundRect(x + 12, probY, cardWidth - 24, 24, 6);
+        ctx.fill();
+
+        // Probability fill
+        let probColor;
+        if (probability < 30) probColor = '#ef4444';
+        else if (probability < 60) probColor = '#fbbf24';
+        else probColor = '#10b981';
+
+        ctx.fillStyle = probColor + '40';
+        ctx.beginPath();
+        ctx.roundRect(x + 12, probY, (cardWidth - 24) * (probability / 100), 24, 6);
+        ctx.fill();
+
+        // Probability text
+        ctx.font = 'bold 14px "Inter", sans-serif';
         ctx.fillStyle = probColor;
-        ctx.fillText(`${probability.toFixed(0)}%`, x + 190, y + 5);
+        ctx.textAlign = 'center';
+        ctx.fillText(`${probability.toFixed(0)}% BREAK`, x + cardWidth / 2 - 20, probY + 16);
 
-        ctx.font = '10px sans-serif';
-        ctx.fillStyle = '#666';
-        ctx.fillText('BREAK CHANCE', x + 190, y + 18);
+        // Confidence badge
+        ctx.font = 'bold 9px monospace';
+        ctx.fillStyle = confidenceLevel === 'HIGH' ? '#10b981' : confidenceLevel === 'MED' ? '#fbbf24' : '#888';
+        ctx.textAlign = 'right';
+        ctx.fillText(confidenceLevel, x + cardWidth - 16, probY + 16);
+
+        // Draw zone markers on chart
+        if (activeZone.wallCount > 1) {
+            const zoneTop = this._getY(activeZone.priceMax);
+            const zoneBottom = this._getY(activeZone.priceMin);
+
+            ctx.fillStyle = isAsk ? 'rgba(239, 68, 68, 0.05)' : 'rgba(16, 185, 129, 0.05)';
+            ctx.fillRect(0, zoneTop, x - 10, zoneBottom - zoneTop);
+
+            ctx.strokeStyle = borderColor + '40';
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            ctx.moveTo(0, zoneTop);
+            ctx.lineTo(x - 10, zoneTop);
+            ctx.moveTo(0, zoneBottom);
+            ctx.lineTo(x - 10, zoneBottom);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        // Draw connection line from HUD to wall
+        ctx.strokeStyle = borderColor + '60';
+        ctx.setLineDash([4, 4]);
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x + cardWidth, y + cardHeight / 2);
+        ctx.lineTo(this.width - 55, wallY); // To price axis marker area
+        ctx.stroke();
+        ctx.setLineDash([]);
     }
 
     _drawCrosshair(ctx) {
@@ -1243,6 +1942,7 @@ export class FootprintChart {
             case 'ARROWRIGHT': this.offsetX -= 50; break;
             case 'ARROWUP': this.offsetY += 50; break;
             case 'ARROWDOWN': this.offsetY -= 50; break;
+            case 'ESCAPE': this._selectedWallPrice = null; this.requestDraw(); break;
             default: handled = false;
         }
         if (handled) { e.preventDefault(); this.requestDraw(); }
@@ -1275,6 +1975,25 @@ export class FootprintChart {
         const x = e.clientX - rect.left;
         const y = e.clientY - rect.top;
         const { width, height } = this;
+
+        // Check if clicking on a wall marker
+        if (this._wallZones && this._wallZones.length > 0) {
+            for (const zone of this._wallZones) {
+                if (zone.markerX && zone.markerY && zone.markerWidth && zone.markerHeight) {
+                    if (x >= zone.markerX && x <= zone.markerX + zone.markerWidth &&
+                        y >= zone.markerY - zone.markerHeight / 2 && y <= zone.markerY + zone.markerHeight / 2) {
+                        // Toggle selection: click same = deselect, click other = select
+                        if (this._selectedWallPrice && Math.abs(this._selectedWallPrice - zone.avgPrice) < 100) {
+                            this._selectedWallPrice = null; // Deselect
+                        } else {
+                            this._selectedWallPrice = zone.avgPrice; // Select
+                        }
+                        this.requestDraw();
+                        return; // Don't start drag
+                    }
+                }
+            }
+        }
 
         if (x > width - 50) {
             this.isDraggingPrice = true;
@@ -1347,6 +2066,26 @@ export class FootprintChart {
             this.offsetY -= y - this.lastY;
         }
 
+        // Check hover over wall markers
+        if (this._wallZones && this._wallZones.length > 0) {
+            let foundZone = null;
+            for (const zone of this._wallZones) {
+                if (zone.markerX && zone.markerY && zone.markerWidth && zone.markerHeight) {
+                    if (x >= zone.markerX && x <= zone.markerX + zone.markerWidth &&
+                        y >= zone.markerY - zone.markerHeight / 2 && y <= zone.markerY + zone.markerHeight / 2) {
+                        foundZone = zone;
+                        break;
+                    }
+                }
+            }
+            // Store by price to survive redraws (zones get recreated each frame)
+            const newHoveredPrice = foundZone ? foundZone.avgPrice : null;
+            if (newHoveredPrice !== this._hoveredWallPrice) {
+                this._hoveredWallPrice = newHoveredPrice;
+                this.requestDraw();
+            }
+        }
+
         if (this.isDragging || this.isDraggingPrice || this.isDraggingTime || this.showLens) {
             this.lastX = x;
             this.lastY = y;
@@ -1372,5 +2111,77 @@ export class FootprintChart {
             this.canvas.height = this.height;
             this.requestDraw();
         }).observe(this.container);
+    }
+
+    _drawTradePlan(ctx) {
+        if (!this.mlPrediction || !this.mlPrediction.signal) return;
+
+        const { entry, sl, tp, confidence, rr } = this.mlPrediction;
+        const width = this.width;
+
+        ctx.save();
+        ctx.font = 'bold 12px "Inter", sans-serif';
+
+        // Helper to draw line
+        const drawLevel = (price, color, label, isDashed = false) => {
+            const y = this._getY(price);
+            if (y < 0 || y > this.height) return;
+
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 2;
+            ctx.setLineDash(isDashed ? [6, 4] : []);
+            ctx.beginPath();
+            ctx.moveTo(0, y);
+            ctx.lineTo(width, y);
+            ctx.stroke();
+
+            // Label
+            ctx.fillStyle = color;
+            ctx.fillText(label, width - 120, y - 5);
+        };
+
+        // 1. ENTRY (Dashed Green)
+        drawLevel(entry, '#00e676', `ENTRY: ${entry.toFixed(2)}`, true);
+
+        // 2. STOP LOSS (Red)
+        const lossPct = ((entry - sl) / entry * 100).toFixed(2);
+        drawLevel(sl, '#ff1744', `SL: ${sl.toFixed(2)} (-${lossPct}%)`);
+
+        // 3. TARGET (Green)
+        const gainPct = ((tp - entry) / entry * 100).toFixed(2);
+        drawLevel(tp, '#00bcd4', `TP: ${tp.toFixed(2)} (+${gainPct}%) R:${rr.toFixed(1)}`);
+
+        // Setup Box
+        const startY = this._getY(entry);
+        if (startY > 50) {
+            ctx.fillStyle = 'rgba(15, 20, 25, 0.9)';
+            ctx.strokeStyle = '#00e676';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([]);
+            // Box near right edge
+            const boxX = width - 180;
+            const boxY = startY - 80;
+
+            ctx.beginPath();
+            ctx.roundRect(boxX, boxY, 170, 70, 8);
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.fillStyle = '#fff';
+            ctx.textAlign = 'left';
+            ctx.font = 'bold 13px sans-serif';
+            ctx.fillText('🤖 AI TRADE SETUP', boxX + 10, boxY + 20);
+
+            ctx.font = '11px monospace';
+            ctx.fillStyle = '#aaa';
+            ctx.fillText(`Type: Support Bounce`, boxX + 10, boxY + 38);
+
+            const confColor = confidence > 0.8 ? '#00e676' : '#ffd700';
+            ctx.fillStyle = confColor;
+            ctx.font = 'bold 12px sans-serif';
+            ctx.fillText(`Confidence: ${(confidence * 100).toFixed(0)}%`, boxX + 10, boxY + 58);
+        }
+
+        ctx.restore();
     }
 }

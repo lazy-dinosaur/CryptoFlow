@@ -100,6 +100,11 @@ body {
   overflow: hidden;
 }
 
+/* Generic Utility Class */
+.hidden {
+  display: none !important;
+}
+
 #app {
   display: grid;
   grid-template-rows: var(--header-height) 1fr var(--footer-height);

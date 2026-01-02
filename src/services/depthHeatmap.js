@@ -59,17 +59,47 @@ export class DepthHeatmapStore {
     }
 
     /**
-     * Start periodic sync
-     * DISABLED: Server collects data autonomously now
-     */
-    /**
-     * Start periodic sync
-     * DISABLED: Server collects data autonomously now
+     * Start periodic sync to fetch latest snapshots from server
+     * This ensures we get full-depth data (500 levels per side) instead of limited WebSocket data
      */
     _startSync() {
-        // Client only reads history on load
-        // No push needed
-        return;
+        // Fetch latest snapshot from server every second
+        setInterval(async () => {
+            if (!this.symbol) return;
+
+            try {
+                const qs = new URLSearchParams({
+                    symbol: this.symbol,
+                    limit: '1',  // Just the latest snapshot
+                    step: '1'   // No downsampling
+                });
+
+                const res = await fetch(`/api/depth?${qs.toString()}`);
+                const data = await res.json();
+
+                if (data.snapshots && data.snapshots.length > 0) {
+                    const latestFromServer = data.snapshots[data.snapshots.length - 1];
+
+                    // Only append if newer than what we have
+                    const lastLocal = this.snapshots[this.snapshots.length - 1];
+                    if (!lastLocal || latestFromServer.time > lastLocal.time) {
+                        this.snapshots.push(latestFromServer);
+
+                        // Update max volume
+                        if (latestFromServer.maxVolume > this.maxVolumeInHistory) {
+                            this.maxVolumeInHistory = latestFromServer.maxVolume;
+                        }
+
+                        // Limit history size
+                        if (this.snapshots.length > this.maxSnapshots) {
+                            this.snapshots.shift();
+                        }
+                    }
+                }
+            } catch (err) {
+                // Silent fail - WebSocket data is fallback
+            }
+        }, 5000); // Every 5 seconds (reduced from 1s to prevent flickering)
     }
 
     /**
@@ -135,14 +165,14 @@ export class DepthHeatmapStore {
         const bids = Array.from(this.currentBids.entries())
             .filter(([_, qty]) => qty >= this.minVolumeForHeatmap)
             .sort((a, b) => b[0] - a[0])
-            .slice(0, 100) // Top 100 levels only
+            .slice(0, 500) // Top 500 levels for better coverage
             .map(([price, qty]) => ({ p: price, q: qty }));
 
         // Filter and sort asks (lowest price first)
         const asks = Array.from(this.currentAsks.entries())
             .filter(([_, qty]) => qty >= this.minVolumeForHeatmap)
             .sort((a, b) => a[0] - b[0])
-            .slice(0, 100) // Top 100 levels only
+            .slice(0, 500) // Top 500 levels for better coverage
             .map(([price, qty]) => ({ p: price, q: qty }));
 
         // Update stats

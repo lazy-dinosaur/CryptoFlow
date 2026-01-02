@@ -21,4 +21,8 @@ echo.
 echo Press Ctrl+C to stop
 echo.
 
+echo Starting ML Service...
+start "CryptoFlow ML Brain" python ml_service.py
+timeout /t 5
+
 node api.js

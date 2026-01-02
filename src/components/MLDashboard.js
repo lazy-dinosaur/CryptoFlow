@@ -15,16 +15,29 @@ export class MLDashboard {
         this._startPolling();
     }
 
-    toggle() {
-        this.container.classList.toggle('hidden');
+    get isVisible() {
         return !this.container.classList.contains('hidden');
     }
 
-    _init() {
-        if (!this.container) {
-            console.warn('MLDashboard container not found!');
-            return;
+    setVisible(visible) {
+        if (visible) {
+            this.container.classList.remove('hidden');
+        } else {
+            this.container.classList.add('hidden');
         }
+    }
+
+    toggle() {
+        this.setVisible(!this.isVisible);
+        return this.isVisible;
+    }
+
+    _init() {
+        // Create a dedicated container for the dashboard
+        this.container = document.createElement('div');
+        this.container.id = 'ml-dashboard-overlay-root';
+        document.body.appendChild(this.container);
+
         this.container.innerHTML = `
             <div class="ml-dashboard">
                 <div class="ml-header" id="mlHeader">
@@ -41,36 +54,41 @@ export class MLDashboard {
             </div>
         `;
 
-        // Add styles
         this._addStyles();
 
         // Toggle expand
-        document.getElementById('mlHeader').addEventListener('click', () => {
-            this.expanded = !this.expanded;
-            document.getElementById('mlContent').style.display = this.expanded ? 'block' : 'none';
-            document.querySelector('.ml-expand').textContent = this.expanded ? '▲' : '▼';
-        });
+        const header = this.container.querySelector('#mlHeader');
+        if (header) {
+            header.addEventListener('click', () => {
+                this.expanded = !this.expanded;
+                const content = this.container.querySelector('#mlContent');
+                const icon = this.container.querySelector('.ml-expand');
+                if (content) content.style.display = this.expanded ? 'block' : 'none';
+                if (icon) icon.textContent = this.expanded ? '▲' : '▼';
+            });
+        }
+
+        console.log('MLDashboard initialized (Dynamic Overlay Mode)');
+        this.setVisible(true);
     }
 
     _addStyles() {
-        if (document.getElementById('ml-dashboard-styles')) return;
-
         const style = document.createElement('style');
-        style.id = 'ml-dashboard-styles';
         style.textContent = `
             .ml-dashboard {
-                position: absolute;
-                top: 50px;
-                left: 10px;
+                position: fixed;
+                top: 120px; /* Moved down to avoid headers */
+                left: 20px;
                 background: rgba(15, 20, 25, 0.95);
-                border: 1px solid rgba(0, 230, 118, 0.3);
+                border: 1px solid rgba(0, 255, 128, 0.5); /* BRIGHT GREEN BORDER */
                 border-radius: 8px;
                 font-family: Inter, sans-serif;
                 font-size: 12px;
                 color: #fff;
-                z-index: 1000;
-                min-width: 200px;
+                z-index: 2147483647; /* MAX INT JS Z-INDEX */
+                min-width: 220px;
                 backdrop-filter: blur(10px);
+                box-shadow: 0 4px 12px rgba(0,0,0,0.8);
             }
             
             .ml-header {
@@ -195,6 +213,9 @@ export class MLDashboard {
                 opacity: 0.5;
                 cursor: not-allowed;
             }
+            
+            /* FAILSAFE HIDDEN CLASS */
+            .hidden { display: none !important; }
         `;
         document.head.appendChild(style);
     }
@@ -292,22 +313,101 @@ export class MLDashboard {
             <button class="ml-btn" id="mlTrainBtn">🔄 Manuelles Training</button>
         `;
 
-        // Add train button handler
-        document.getElementById('mlTrainBtn')?.addEventListener('click', async (e) => {
-            const btn = e.target;
-            btn.disabled = true;
-            btn.textContent = '⏳ Training läuft...';
+        // Add train button handler logic
+        const trainBtn = stats.querySelector('#mlTrainBtn');
+        if (trainBtn) {
+            trainBtn.addEventListener('click', async (e) => {
+                console.log('Train button clicked');
+                const btn = e.target;
+                btn.disabled = true;
+                btn.textContent = '⏳ Training läuft...';
 
-            try {
-                await fetch(`${this.apiUrl}/train`);
-                await this._fetchStatus();
-            } catch (error) {
-                console.error('Training failed:', error);
+                try {
+                    console.log(`Calling ${this.apiUrl}/train`);
+                    const response = await fetch(`${this.apiUrl}/train`, {
+                        headers: {
+                            'x-api-key': 'CryptoFlowMasterKey2025!'
+                        }
+                    });
+                    const data = await response.json();
+                    console.log('Training response:', data);
+                    await this._fetchStatus();
+                } catch (error) {
+                    console.error('Training failed:', error);
+                    alert('Training failed: ' + error.message);
+                }
+
+                btn.disabled = false;
+                btn.textContent = '🔄 Manuelles Training';
+            });
+        }
+    }
+
+    updatePredictionUI(result) {
+        // Update dashboard prediction display if exists
+        let predEl = document.getElementById('ml-live-prediction');
+        if (!predEl) {
+            // INSERT AFTER HEADER (Always Visible)
+            const header = document.getElementById('mlHeader');
+            if (header) {
+                const div = document.createElement('div');
+                div.id = 'ml-live-prediction';
+                div.style.padding = '10px';
+                div.style.borderBottom = '1px solid rgba(255,255,255,0.1)';
+                div.style.textAlign = 'center';
+                div.style.fontWeight = 'bold';
+                div.style.fontSize = '12px';
+                div.style.background = 'rgba(255,255,255,0.02)';
+
+                // Insert after header
+                header.insertAdjacentElement('afterend', div);
+                predEl = div;
             }
+        }
 
-            btn.disabled = false;
-            btn.textContent = '🔄 Manuelles Training';
-        });
+        if (predEl) {
+            if (result.signal) {
+                // Active Signal
+                const confidence = (result.confidence * 100).toFixed(0);
+                const rr = result.rr ? result.rr.toFixed(1) : '?';
+
+                predEl.style.background = 'rgba(0, 230, 118, 0.15)';
+                predEl.style.borderColor = '#00e676';
+
+                predEl.innerHTML = `
+                <div style="color: #00e676; font-size: 14px; margin-bottom: 4px;">🚀 TRADE FOUND</div>
+                <div style="font-size: 11px; color: #ccc;">
+                    ${result.direction || 'LONG'} | Acc: ${confidence}% | RR: 1:${rr}
+                </div>
+            `;
+            } else {
+                // Scanning / No Signal
+                predEl.style.background = 'rgba(255,255,255,0.05)';
+                predEl.style.borderColor = 'rgba(255,255,255,0.1)';
+
+                // Show reason if available (e.g. "Values too low")
+                const msg = result.message || 'Scanning...';
+                predEl.innerHTML = `
+                <div style="color: #8899aa;">
+                    <span class="pulse-dot"></span> ${msg}
+                </div>
+                `;
+            }
+        }
+    }
+
+    async predictFromCandles(candles) {
+        try {
+            const response = await fetch(`${this.apiUrl}/predict_raw`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ candles })
+            });
+            if (!response.ok) throw new Error(response.statusText);
+            return await response.json();
+        } catch (error) {
+            return null;
+        }
     }
 
     /**

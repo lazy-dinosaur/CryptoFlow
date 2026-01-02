@@ -173,6 +173,43 @@ class CryptoFlowApp {
         // ML Dashboard
         this.mlDashboard = new MLDashboard('mlDashboard');
 
+        // FORCE TRUE for debugging (Verify if localstorage is the culprit)
+        const isMLVisible = true;
+
+        this.mlDashboard.setVisible(true);
+        this.footprintChart.showML = true;
+
+        if (this.elements.toggleML) this.elements.toggleML.checked = true;
+
+        this.mlDashboard.setVisible(isMLVisible);
+        if (this.elements.toggleML) this.elements.toggleML.checked = isMLVisible;
+
+        // Setup ML Prediction Loop (Throttled 2s)
+        this.lastPredictionTime = 0;
+        dataAggregator.on('candleUpdate', async () => {
+            if (!this.mlDashboard.isVisible) return; // Only predict if visible
+
+            const now = Date.now();
+            if (now - this.lastPredictionTime < 2000) return; // Throttle
+            this.lastPredictionTime = now;
+
+            // Get last 20 candles for context
+            const candles = dataAggregator.getCandles().slice(-20);
+            if (!candles || candles.length < 10) return;
+
+            const result = await this.mlDashboard.predictFromCandles(candles);
+            if (result && result.prediction) {
+                // Update Chart or UI
+                if (this.footprintChart) {
+                    this.footprintChart.setMLPrediction(result);
+                    // Also update dashboard UI if needed
+                    this.mlDashboard.updatePredictionUI(result);
+                }
+            }
+        });
+
+
+
     }
 
     /**
@@ -288,14 +325,14 @@ class CryptoFlowApp {
 
         // Toggle ML Dashboard Button logic
         // Toggle ML Dashboard (Checkbox)
+        // Toggle ML Dashboard (Checkbox)
         if (this.elements.toggleML) {
-            this.elements.toggleML.checked = this.mlDashboard.isVisible; // Assuming getter
-            // Actually mlDashboard.toggle returns active state.
             this.elements.toggleML.addEventListener('change', (e) => {
                 const active = e.target.checked;
-                if (active !== this.mlDashboard.active) {
-                    this.mlDashboard.toggle(); // This method might need check
-                }
+                this.mlDashboard.setVisible(active);
+                settingsManager.set('showML', active);
+
+                // Also update chart flag if needed (though dashboard is overlay)
                 this.footprintChart.showML = active;
                 this.footprintChart.requestDraw();
             });
@@ -478,7 +515,9 @@ class CryptoFlowApp {
             // Throttle chart updates to max 1/sec (1000ms) to reduce flickering and load
             const now = Date.now();
             if (now - this._lastHeatmapUpdate >= 1000) {
-                this.footprintChart.updateDepthHeatmap(this.depthHeatmap.getHeatmapData());
+                const heatmapData = this.depthHeatmap.getHeatmapData();
+                console.log('[Heatmap] Updating chart with', heatmapData.snapshots?.length || 0, 'snapshots');
+                this.footprintChart.updateDepthHeatmap(heatmapData);
 
                 // L-toggle overlay: show strongest current book walls near price
                 const walls = this.depthHeatmap.getTopWalls({

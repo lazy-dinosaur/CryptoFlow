@@ -102,8 +102,14 @@ def predict_signal(candle_features):
         return None, 0.0
     
     try:
-        # Create feature vector in correct order
-        X = pd.DataFrame([candle_features])[feature_columns]
+        # Create feature vector with defaults for missing columns (e.g. zone_distance)
+        input_df = pd.DataFrame([candle_features])
+        
+        for col in feature_columns:
+            if col not in input_df.columns:
+                input_df[col] = 0.0
+                
+        X = input_df[feature_columns]
         
         # Get prediction and probability
         pred = model.predict(X)[0]
@@ -116,6 +122,131 @@ def predict_signal(candle_features):
     except Exception as e:
         print(f"Prediction error: {e}")
         return None, 0.0
+
+def predict_raw_candles(candles):
+    """
+    Smart Prediction:
+    1. Reconstruct Zones (Support/Resistance)
+    2. Check if current candle triggers a Setup (Zone Touch + filters)
+    3. If Setup Valid -> Extract Features -> Predict
+    4. Return full trade plan (Entry, SL, TP) if confident
+    """
+    global model, feature_columns
+    
+    if model is None or not candles:
+        return {'error': 'Model not ready'}, 500
+        
+    try:
+        # 1. Prepare Data
+        df = pd.DataFrame(candles)
+        
+        # Rename columns to snake_case
+        column_map = {
+            'buyVolume': 'buy_volume',
+            'sellVolume': 'sell_volume',
+            'tradeCount': 'trade_count'
+        }
+        df = df.rename(columns=column_map)
+        
+        if len(df) < 50:
+             return {'signal': False, 'message': 'Need more history (50+ candles)'}, 200
+             
+        idx = len(df) - 1
+        current_candle = df.iloc[idx]
+        
+        # 2. Find Zones
+        support_zones = find_support_zones(df, idx)
+        resistance_zones = find_resistance_zones(df, idx)
+        
+        # 3. Check Sequence: Is price touching a support zone? (LONG Setup)
+        # Using the same logic as training
+        touching_support = None
+        for zone in support_zones:
+            # Check proximity (using TOLERANCE from trainer)
+            dist = abs(current_candle['low'] - zone['price'])
+            if dist < current_candle['close'] * TOLERANCE:
+                touching_support = zone
+                break
+                
+        if not touching_support:
+            return {'signal': False, 'message': 'Scanning... No Support Zone touch'}, 200
+            
+        # 4. Calculate Trade Params (Entry, SL, TP)
+        entry = current_candle['close']
+        # SL below zone or low
+        sl = min(current_candle['low'], touching_support['price']) * 0.9995
+        risk = entry - sl
+        
+        if risk <= 0:
+            return {'signal': False, 'message': 'Invalid Risk'}, 200
+            
+        # Find TP (Next Resistance)
+        tp = None
+        min_dist_to_res = float('inf')
+        
+        for zone in resistance_zones:
+            if zone['price'] > entry:
+                dist = zone['price'] - entry
+                if dist < min_dist_to_res:
+                    min_dist_to_res = dist
+                    tp = zone['price']
+                    
+        # Default TP if no resistance found (1:2 RR)
+        if not tp:
+            tp = entry + (risk * 2)
+            
+        rr = (tp - entry) / risk
+        if rr < 1.0: # Filter bad RR
+             return {'signal': False, 'message': f'Bad RR ({rr:.2f})'}, 200
+             
+        # 5. Extract Features for Model
+        # We must manually inject the zone features that regular extract_features might miss
+        features = extract_features(df, idx)
+        if features is None:
+            return {'error': 'Feature extraction failed'}, 500
+            
+        # Add Zone Features
+        features['zone_distance'] = abs(current_candle['low'] - touching_support['price'])
+        features['zone_age'] = idx - touching_support['idx']
+        features['zone_strength'] = touching_support['strength']
+        features['risk_reward'] = rr
+        
+        # Ensure all model columns exist
+        input_df = pd.DataFrame([features])
+        for col in feature_columns:
+            if col not in input_df.columns:
+                input_df[col] = 0.0
+        
+        X = input_df[feature_columns]
+        
+        # 6. Predict
+        pred = model.predict(X)[0]
+        proba = model.predict_proba(X)[0]
+        confidence = proba[1] if pred == 1 else proba[0]
+        
+        # 7. Final Output Decision
+        # Only signal if Model predicts WIN with high confidence OR if it matches our basic setup
+        # User wants "sure" -> Threshold 0.6
+        if pred == 1 and confidence > 0.6:
+            return {
+                'signal': True,
+                'direction': 'LONG',
+                'setupType': 'Support Bounce',
+                'entry': float(entry),
+                'sl': float(sl),
+                'tp': float(tp),
+                'rr': float(rr),
+                'confidence': float(confidence),
+                'zonePrice': float(touching_support['price'])
+            }, 200
+        else:
+             return {'signal': False, 'message': f'Weak Signal ({confidence*100:.0f}%)'}, 200
+
+    except Exception as e:
+        print(f"Raw prediction error: {e}")
+        import traceback
+        traceback.print_exc()
+        return {'error': str(e)}, 500
 
 def run_training():
     """Run a full training cycle."""
@@ -289,6 +420,23 @@ class MLAPIHandler(BaseHTTPRequestHandler):
                 'prediction': prediction,
                 'confidence': confidence
             })
+        elif parsed.path == '/api/ml/predict_raw':
+            content_length = int(self.headers['Content-Length'])
+            body = self.rfile.read(content_length)
+            data = json.loads(body)
+            
+            candles = data.get('candles', [])
+            result = predict_raw_candles(candles)
+            
+            # predict_raw_candles returns tuple (result, confidence) or (dict, status)
+            if isinstance(result, tuple) and isinstance(result[0], dict):
+                 # Error case
+                 self.send_error(result[1], result[0]['error'])
+            else:
+                self.send_json({
+                    'prediction': result[0],
+                    'confidence': result[1]
+                })
         else:
             self.send_error(404, 'Not found')
     

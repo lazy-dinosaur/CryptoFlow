@@ -64,7 +64,7 @@ function processTrade(symbol, trade) {
     const state = getState(symbol);
     const tickSize = CONFIG.tickSizes[symbol] || 1;
     const roundedPrice = roundToTick(trade.price, tickSize);
-    const isBuy = !trade.isBuyerMaker;
+    const isBuy = trade.isBuyerMaker; // INVERTED LOGIC (Matches Frontend)
 
     // Store raw trade
     db.insertTrade(symbol, trade);
