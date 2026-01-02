@@ -391,6 +391,130 @@ def training_scheduler():
         # Run training
         run_training()
 
+def backtest_signals(candles):
+    """
+    Run prediction logic on historical candles to find past signals.
+    """
+    global model, feature_columns
+    
+    if model is None or not candles:
+        return {'error': 'Model not ready'}, 500
+        
+    try:
+        df = pd.DataFrame(candles)
+        column_map = {
+            'buyVolume': 'buy_volume',
+            'sellVolume': 'sell_volume',
+            'tradeCount': 'trade_count'
+        }
+        df = df.rename(columns=column_map)
+        
+        if len(df) < 50:
+            return {'signals': []}, 200
+            
+        # Pre-calc features for speed
+        # We need to capture TA-Lib errors if df is small, but check above handles that
+        try:
+            # We use the trainer's extract_features but it only returns a single row.
+            # For speed, we should implement a bulk feature extraction if possible,
+            # BUT our logic relies on `find_support_zones` which is point-in-time.
+            # So simple loop is safest for correctness.
+            pass
+        except Exception as e:
+            pass
+
+        signals = []
+        
+        # Iterate from index 50 to end
+        # Skip last candle (live) as that's handled by main loop
+        for i in range(50, len(df)):
+            try:
+                # 1. Simulate "Live" State at index i
+                # Create a mini-slice for zone detection? 
+                # find_support_zones(df, idx) already handles looking ONLY at df[:idx+1] implicitly?
+                # Actually find_support_zones(df, i) uses i as the "current" index.
+                # It looks at pivots BEFORE i.
+                
+                # We need to run the EXACT same logic as predict_raw_candles but for index i
+                current_candle = df.iloc[i]
+                
+                support_zones = find_support_zones(df, i)
+                resistance_zones = find_resistance_zones(df, i)
+                
+                # Check for Support Touch
+                touching_support = None
+                for zone in support_zones:
+                    dist = abs(current_candle['low'] - zone['price'])
+                    if dist < current_candle['close'] * TOLERANCE:
+                        touching_support = zone
+                        break
+                
+                if not touching_support:
+                    continue
+                    
+                # Calculate Trade Params
+                entry = current_candle['close']
+                sl = min(current_candle['low'], touching_support['price']) * 0.9995
+                risk = entry - sl
+                
+                if risk <= 0: continue
+                
+                # TP
+                tp = None
+                min_dist_to_res = float('inf')
+                for zone in resistance_zones:
+                    if zone['price'] > entry:
+                        dist = zone['price'] - entry
+                        if dist < min_dist_to_res:
+                            min_dist_to_res = dist
+                            tp = zone['price']
+                
+                if not tp: tp = entry + (risk * 2)
+                
+                rr = (tp - entry) / risk
+                if rr < 1.0: continue
+                
+                # Features
+                features = extract_features(df, i)
+                if features is None: continue
+                
+                features['zone_distance'] = abs(current_candle['low'] - touching_support['price'])
+                features['zone_age'] = i - touching_support['idx']
+                features['zone_strength'] = touching_support['strength']
+                features['risk_reward'] = rr
+                
+                # Predict
+                input_df = pd.DataFrame([features])
+                for col in feature_columns:
+                    if col not in input_df.columns:
+                        input_df[col] = 0.0
+                X = input_df[feature_columns]
+                
+                pred = model.predict(X)[0]
+                proba = model.predict_proba(X)[0]
+                confidence = proba[1] if pred == 1 else proba[0]
+                
+                if pred == 1 and confidence > 0.6:
+                    signals.append({
+                        'candleTime': int(current_candle['time']), # JS timestamp
+                        'type': 'LONG',
+                        'entry': float(entry),
+                        'sl': float(sl),
+                        'tp': float(tp),
+                        'rr': float(rr),
+                        'confidence': float(confidence),
+                        'zonePrice': float(touching_support['price'])
+                    })
+                    
+            except Exception as loop_err:
+                continue
+
+        return {'signals': signals}, 200
+
+    except Exception as e:
+        print(f"Backtest error: {e}")
+        return {'error': str(e)}, 500
+
 class MLAPIHandler(BaseHTTPRequestHandler):
     """HTTP handler for ML API endpoints."""
     
@@ -428,15 +552,28 @@ class MLAPIHandler(BaseHTTPRequestHandler):
             candles = data.get('candles', [])
             result = predict_raw_candles(candles)
             
-            # predict_raw_candles returns tuple (result, confidence) or (dict, status)
-            if isinstance(result, tuple) and isinstance(result[0], dict):
-                 # Error case
-                 self.send_error(result[1], result[0]['error'])
+            # Result is (response_dict, status_code)
+            response_data, status_code = result
+            
+            if status_code == 200:
+                self.send_json(response_data)
             else:
-                self.send_json({
-                    'prediction': result[0],
-                    'confidence': result[1]
-                })
+                self.send_error(status_code, response_data.get('error', 'Unknown error'))
+                
+        elif parsed.path == '/api/ml/backtest':
+            content_length = int(self.headers['Content-Length'])
+            body = self.rfile.read(content_length)
+            data = json.loads(body)
+            
+            candles = data.get('candles', [])
+            result = backtest_signals(candles)
+            
+            response_data, status_code = result
+            if status_code == 200:
+                self.send_json(response_data)
+            else:
+                self.send_error(status_code, response_data.get('error', 'Unknown error'))
+                
         else:
             self.send_error(404, 'Not found')
     
@@ -475,9 +612,10 @@ def main():
     server = HTTPServer(('127.0.0.1', SERVICE_PORT), MLAPIHandler)
     print(f"ML API server running on port {SERVICE_PORT}")
     print("\nEndpoints:")
-    print(f"  GET  /api/ml/status  - Get ML status and history")
-    print(f"  GET  /api/ml/train   - Trigger manual retraining")
-    print(f"  POST /api/ml/predict - Get prediction for signal")
+    print(f"  GET  /api/ml/status     - Get ML status and history")
+    print(f"  GET  /api/ml/train      - Trigger manual retraining")
+    print(f"  POST /api/ml/predict    - Get prediction for signal")
+    print(f"  POST /api/ml/backtest   - Scan historical data for signals")
     
     try:
         server.serve_forever()

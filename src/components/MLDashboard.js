@@ -410,6 +410,22 @@ export class MLDashboard {
         }
     }
 
+    async backtestHistory(candles) {
+        try {
+            const response = await fetch(`${this.apiUrl}/backtest`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ candles })
+            });
+            if (!response.ok) throw new Error(response.statusText);
+            const data = await response.json();
+            return data.signals || [];
+        } catch (error) {
+            console.error('Backtest error:', error);
+            return [];
+        }
+    }
+
     /**
      * Get prediction confidence for a signal
      * @param {Object} features - Signal features

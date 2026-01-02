@@ -542,6 +542,12 @@ class CryptoFlowApp {
         dataAggregator.on('candleUpdate', () => {
             this._updateCharts();
 
+            // Auto-Backtest once history is loaded
+            if (!this.hasRunInitialBacktest && this.footprintChart && this.footprintChart.candles.length > 100) {
+                this.hasRunInitialBacktest = true;
+                this._runBacktest();
+            }
+
             // Update Market Analysis panel
             if (this.marketAnalysis && this.footprintChart) {
                 this.marketAnalysis.analyze({
@@ -591,6 +597,9 @@ class CryptoFlowApp {
         dataAggregator.reset();
         this.orderBook.clear();
         this.depthHeatmap.reset();
+        this.hasRunInitialBacktest = false; // Reset for new symbol
+        this.footprintChart.setMLHistory([]); // Clear past signals
+
         // Load heatmap history in background (non-blocking)
         this.depthHeatmap.setSymbol(symbol).then(() => {
             this.footprintChart.updateDepthHeatmap(this.depthHeatmap.getHeatmapData());
@@ -872,6 +881,16 @@ class CryptoFlowApp {
         } else {
             return sign + vol.toFixed(4);
         }
+    }
+    async _runBacktest() {
+        if (!this.mlDashboard || !this.footprintChart || !this.footprintChart.showML) return;
+
+        console.log('Running initial backtest...');
+        const candles = this.footprintChart.candles;
+        const signals = await this.mlDashboard.backtestHistory(candles);
+
+        console.log('Backtest complete. Found signals:', signals.length);
+        this.footprintChart.setMLHistory(signals);
     }
 }
 

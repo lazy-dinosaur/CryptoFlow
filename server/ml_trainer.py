@@ -271,24 +271,28 @@ def extract_whale_features(candle, whale_trades, prev_candles):
     return features
 
 def find_support_zones(df, idx):
-    """Find active support zones at candle index."""
+    """Find active support zones at candle index based on Swing Lows."""
     zones = []
     
-    for i in range(max(0, idx-50), idx):
+    # Look back 50 candles for any valid Swing Lows
+    for i in range(max(2, idx-50), idx-2):
         candle = df.iloc[i]
-        prev = df.iloc[i-1] if i > 0 else candle
         
-        # Absorption pattern: Strong rejection with high volume
-        if (candle['low'] < prev['low'] and 
-            candle['close'] > candle['open'] and
-            candle['delta'] > 0):
+        # Fractal / Pivot Low (5-bar)
+        # low[i] is lower than 2 left and 2 right
+        l = df.iloc[i]['low']
+        if (l < df.iloc[i-1]['low'] and 
+            l < df.iloc[i-2]['low'] and 
+            l < df.iloc[i+1]['low'] and 
+            l < df.iloc[i+2]['low']):
             
-            zone_price = candle['low']
+            zone_price = l
             
             # Check if zone is still valid (not broken)
             is_broken = False
+            # It's broken if a subsequent candle closes BELOW it
             for j in range(i+1, idx):
-                if df.iloc[j]['close'] < zone_price * 0.999:
+                if df.iloc[j]['close'] < zone_price * 0.9995: # slight buffer
                     is_broken = True
                     break
             
@@ -296,30 +300,32 @@ def find_support_zones(df, idx):
                 zones.append({
                     'price': zone_price,
                     'idx': i,
-                    'strength': candle['volume']
+                    'strength': candle['volume'] # Simple strength proxy
                 })
     
     return zones
 
 def find_resistance_zones(df, idx):
-    """Find active resistance zones at candle index."""
+    """Find active resistance zones at candle index based on Swing Highs."""
     zones = []
     
-    for i in range(max(0, idx-50), idx):
+    for i in range(max(2, idx-50), idx-2):
         candle = df.iloc[i]
-        prev = df.iloc[i-1] if i > 0 else candle
         
-        # Absorption pattern: Strong rejection with high volume
-        if (candle['high'] > prev['high'] and 
-            candle['close'] < candle['open'] and
-            candle['delta'] < 0):
+        # Fractal / Pivot High (5-bar)
+        h = df.iloc[i]['high']
+        if (h > df.iloc[i-1]['high'] and 
+            h > df.iloc[i-2]['high'] and 
+            h > df.iloc[i+1]['high'] and 
+            h > df.iloc[i+2]['high']):
             
-            zone_price = candle['high']
+            zone_price = h
             
             # Check if zone is still valid (not broken)
+            # It's broken if a subsequent candle closes ABOVE it
             is_broken = False
             for j in range(i+1, idx):
-                if df.iloc[j]['close'] > zone_price * 1.001:
+                if df.iloc[j]['close'] > zone_price * 1.0005:
                     is_broken = True
                     break
             
@@ -413,11 +419,9 @@ def generate_training_data(df, depth_data=None, whale_trades=None):
         candle = df.iloc[idx]
         
         # Basic filters
-        is_green = candle['close'] > candle['open']
-        has_positive_delta = candle['delta'] > 0
-        
-        if not (is_green and has_positive_delta):
-            continue
+        # REMOVED PRE-FILTERS: Allow ML to learn from red candles and negative delta too
+        # We only care if it bounced from support
+
         
         # Find support zones
         support_zones = find_support_zones(df, idx)

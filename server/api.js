@@ -24,7 +24,7 @@ const app = express();
 const compression = require('compression');
 app.use(compression());
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
 
 // Serve static frontend files
 const distPath = path.join(__dirname, '..', 'dist');

@@ -89,6 +89,7 @@ export class FootprintChart {
         this.dragStartY = 0;
 
         this.mlPrediction = null; // { prediction: 'win', confidence: 0.85 }
+        this.mlHistory = new Map(); // timestamp -> signal
 
         // PRO COLORS
         this.colors = {
@@ -138,6 +139,7 @@ export class FootprintChart {
 
     // PUBLIC API
     updateCandles(candles) {
+        const oldCandles = this.candles || [];
         this.candles = candles || [];
 
         // PRE-CALCULATE CVD
@@ -150,6 +152,20 @@ export class FootprintChart {
 
         // PRE-CALCULATE SESSION PROFILE
         this._calculateSessionProfile();
+
+        // Auto-Center ONLY if dataset changed significantly (e.g. Symbol/TF switch)
+        // Heuristic: If First Candle Time changed, or if we went from 0 to N candles
+        const oldStart = oldCandles.length > 0 ? oldCandles[0].time : 0;
+        const newStart = this.candles.length > 0 ? this.candles[0].time : 0;
+        const isNewDataset = (oldCandles.length === 0 && this.candles.length > 0) || (oldStart !== newStart);
+
+        if (isNewDataset) {
+            // Update current price from last candle if not set
+            if (!this.currentPrice && this.candles.length > 0) {
+                this.currentPrice = this.candles[this.candles.length - 1].close;
+            }
+            this.resetView();
+        }
 
         this.requestDraw();
     }
@@ -213,6 +229,16 @@ export class FootprintChart {
         this.requestDraw();
     }
 
+    setMLHistory(signals) {
+        this.mlHistory.clear();
+        if (signals && Array.isArray(signals)) {
+            for (const s of signals) {
+                this.mlHistory.set(s.candleTime, s);
+            }
+        }
+        this.requestDraw();
+    }
+
     setHeatmapIntensityThreshold(val) { this.heatmapIntensityThreshold = val; this.requestDraw(); }
     setHeatmapHistoryPercent(val) {
         this.heatmapHistoryPercent = Math.max(0, Math.min(100, val));
@@ -244,6 +270,30 @@ export class FootprintChart {
         this._recentTradeSizes.push(qty);
         if (this._recentTradeSizes.length > this._recentTradeMax) {
             this._recentTradeSizes.splice(0, this._recentTradeSizes.length - this._recentTradeMax);
+        }
+
+        // Absorption Tracking
+        // Check if trade hit any tracked wall
+        if (this._wallHistory) {
+            const price = Number(trade.price);
+            const isBuyer = trade.isBuyerMaker === false; // Buyer = Taker Buy (Green)
+            // If Buyer -> hits Ask wall. If Seller -> hits Bid wall.
+            const targetType = isBuyer ? 'ask' : 'bid';
+
+            for (const entry of this._wallHistory.values()) {
+                // Only check active/qualified walls of correct type
+                if (entry.zone.type !== targetType) continue;
+
+                // Check if price is within wall zone (with small buffer)
+                const zoneMin = entry.zone.priceMin - 5;
+                const zoneMax = entry.zone.priceMax + 5;
+
+                if (price >= zoneMin && price <= zoneMax) {
+                    if (!entry.absorbed) entry.absorbed = 0;
+                    entry.absorbed += qty;
+                    entry.lastAbsorbTime = Date.now();
+                }
+            }
         }
     }
 
@@ -359,7 +409,7 @@ export class FootprintChart {
 
     // COORDS
     _deltaH() {
-        let h = 0;
+        let h = 30; // Reserve fixed 30px for Time Axis
         if (this.showDelta) h += this.deltaRowHeight;
         if (this.showCVD) h += this.cvdPanelHeight;
         return h;
@@ -417,6 +467,7 @@ export class FootprintChart {
             // Let's tie it to 'showML' flag for now, or just always show if heavy wall nearby.
             if (this.showML) {
                 this._drawWallAttack(ctx); // Existing HUD
+                this._drawHistoricalSignals(ctx); // NEW: Historical markers
                 this._drawTradePlan(ctx);  // NEW Trade Lines
             }
 
@@ -556,6 +607,37 @@ export class FootprintChart {
         const totalCandles = this.candles.length;
         const isLiveCandle = (i) => i === totalCandles - 1; // The rightmost forming candle
 
+        // 0. Auto-Contrast: Calculate Max Volume based on VISIBLE timestamps
+        // STABILIZATION: Enforce a minimum floor relative to threshold to prevent noise amplification
+        const minFloor = (this.liquidityThreshold || 10) * 20; // e.g. 200 BTC minimum scale
+        let visibleMaxVol = minFloor;
+
+        if (hLen > 0) {
+            const actualStartIdx = Math.max(0, startIdx);
+            const actualEndIdx = Math.min(totalCandles - 1, endIdx);
+
+            if (this.candles[actualStartIdx]) {
+                // Look wider (10 mins back) to prevent flickering when panning
+                const startT = this.candles[actualStartIdx].time - 600000;
+                const endT = (this.candles[actualEndIdx]?.time || Date.now()) + 60000;
+
+                // Binary search start index in heatmap
+                let low = 0, high = hLen - 1;
+                let sIdx = 0;
+                while (low <= high) {
+                    const mid = (low + high) >>> 1;
+                    if (this.heatmapData[mid].time < startT) low = mid + 1;
+                    else { sIdx = mid; high = mid - 1; }
+                }
+
+                for (let k = sIdx; k < hLen; k++) {
+                    const s = this.heatmapData[k];
+                    if (s.time > endT) break;
+                    if (s.maxVolume > visibleMaxVol) visibleMaxVol = s.maxVolume;
+                }
+            }
+        }
+
         for (let i = startIdx; i <= endIdx; i++) {
             // Find candle
             if (i < 0 || i >= totalCandles) continue;
@@ -564,113 +646,95 @@ export class FootprintChart {
 
             const cTime = candle.time;
 
+            // Find snapshot (Cached index optimization if sequential?)
+            // We'll stick to robust search since we fixed the logic
+            while (hPtr < hLen - 1 && this.heatmapData[hPtr].time < cTime) {
+                hPtr++;
+            }
+
+            // Snapshot selection logic 
+            // If cTime is much newer than last snapshot, utilize Live Merging logic
+            // Check if we are in the "Live Window" (last 2 mins of history edge)
+            const lastSnapTime = hLen > 0 ? this.heatmapData[hLen - 1].time : 0;
+            const timeBuffer = 120000;
+
+            let levels = [];
             let snapshot = null;
-            let levels = []; // Move levels array declaration here
 
-            // FIX: Use latest snapshot for ALL candles after the last historical snapshot time
-            // This ensures heatmap extends to the live edge continuously
-            const lastHistoricalTime = hLen > 0 ? this.heatmapData[hLen - 1].time : 0;
+            if (cTime >= lastSnapTime - timeBuffer && hLen > 0) {
+                // Live Merging: Last 60 snaps
+                const limit = 60;
+                const endPtr = hPtr;
+                const startPtr = Math.max(0, endPtr - limit + 1);
 
-            // Check if this candle's time is AFTER or NEAR the last snapshot
-            // Use a buffer of 2 minutes to catch any timing gaps
-            const timeBuffer = 2 * 60 * 1000; // 2 minutes in ms
-
-            if (cTime >= lastHistoricalTime - timeBuffer && hLen > 0) {
-                // LIVE CANDLE: Combine levels from last 60 snapshots for broader price coverage
-                // This ensures the heatmap shows similar depth as historical data
-                const snapshotsToMerge = Math.min(60, hLen);
-                const seenPrices = new Set();
-
-                for (let s = hLen - snapshotsToMerge; s < hLen; s++) {
-                    if (s < 0) continue;
-                    const snap = this.heatmapData[s];
+                const seen = new Set();
+                for (let k = startPtr; k <= endPtr; k++) {
+                    const snap = this.heatmapData[k];
                     if (snap.bids) {
                         for (const b of snap.bids) {
-                            const key = b.p.toFixed(1);
-                            if (!seenPrices.has(key)) {
-                                seenPrices.add(key);
-                                levels.push({ p: b.p, q: b.q });
-                            }
+                            const key = b.p.toFixed(1); // Dedup by price
+                            if (!seen.has(key)) { seen.add(key); levels.push(b); }
                         }
                     }
                     if (snap.asks) {
                         for (const a of snap.asks) {
                             const key = a.p.toFixed(1);
-                            if (!seenPrices.has(key)) {
-                                seenPrices.add(key);
-                                levels.push({ p: a.p, q: a.q });
-                            }
+                            if (!seen.has(key)) { seen.add(key); levels.push(a); }
                         }
                     }
                 }
-                snapshot = this.heatmapData[hLen - 1]; // For timestamp logging
+                snapshot = this.heatmapData[endPtr]; // Just for reference
             } else {
-                // Older candles: Find best matching snapshot by time
-                while (hPtr < hLen - 1 && this.heatmapData[hPtr].time < cTime) {
-                    hPtr++;
-                }
+                // Historical: Single snapshot
                 snapshot = this.heatmapData[hPtr];
-
-                // Use levels from single historical snapshot
                 if (snapshot) {
-                    if (snapshot.bids) for (const b of snapshot.bids) levels.push({ p: b.p, q: b.q });
-                    if (snapshot.asks) for (const a of snapshot.asks) levels.push({ p: a.p, q: a.q });
+                    if (snapshot.bids) levels.push(...snapshot.bids);
+                    if (snapshot.asks) levels.push(...snapshot.asks);
                 }
             }
 
-            // Fallback if still no snapshot
-            if (!snapshot && hLen > 0) snapshot = this.heatmapData[hLen - 1];
+            if (levels.length === 0) continue;
 
-            if (!snapshot) continue;
-
-            // DRAW COLUMN
+            // DRAW COLUMN (Heatmap)
             const x = this._getX(i);
             const w = this.zoomX;
+            const h = Math.max(1, this.zoomY);
 
-            let drawnCount = 0; // Count levels actually drawn
+
 
             for (const lev of levels) {
                 if (!lev.p || !lev.q) continue;
                 const y = this._getY(lev.p);
-                const h = Math.max(1, (this.zoomY));
 
-                // Expanded Y-range: Show levels slightly outside visible area (extend by 500px each direction)
-                if (y + h < -500 || y > height - deltaH + 500) continue;
+                // Optimization: Skip off-screen
+                if (y + h < -200 || y > height + 200) continue;
 
-                // Threshold Filter (Controlled by Slider)
-                const ratio = lev.q / this.maxVolumeInHistory;
-                if (ratio < this.heatmapIntensityThreshold) continue;
-
-                drawnCount++;
-
-                // BOOKMAP STYLE: Gamma Corrected Opacity
-                const visRatio = Math.pow(ratio, 0.4);
-
-                let color;
-                const alpha = this.heatmapOpacity;
-
-                if (visRatio < 0.2) {
-                    color = `rgba(0, 50, 200, ${alpha * 0.4})`;
-                } else if (visRatio < 0.4) {
-                    color = `rgba(0, 150, 255, ${alpha * 0.6})`;
-                } else if (visRatio < 0.6) {
-                    color = `rgba(0, 255, 100, ${alpha * 0.8})`;
-                } else if (visRatio < 0.8) {
-                    color = `rgba(255, 255, 0, ${alpha})`;
-                } else {
-                    color = `rgba(255, 0, 0, ${alpha})`;
-                }
-
-                bufCtx.fillStyle = color;
-                bufCtx.fillRect(x, y - h / 2, w + 1, h);
+                this._drawHeatmapRect(bufCtx, x, y - h / 2, w + 1, h, lev.q, visibleMaxVol);
             }
 
-            // Log ONLY for live candle to reduce spam
-            if (isLiveCandle(i)) {
-                console.log(`[Live Candle ${i}] Snapshot time: ${snapshot.time}, Total levels: ${levels.length}, Drawn: ${drawnCount}, MaxVol: ${this.maxVolumeInHistory}`);
-            }
+
         }
+
         ctx.drawImage(this.heatmapBuffer, 0, 0);
+    }
+
+    _drawHeatmapRect(ctx, x, y, w, h, q, maxVol) {
+        // Auto-Contrast Ratio
+        const ratio = q / maxVol;
+        if (ratio < this.heatmapIntensityThreshold) return;
+
+        // Color mapping
+        const visRatio = Math.pow(ratio, 0.4);
+        let color;
+        const alpha = this.heatmapOpacity;
+        if (visRatio < 0.2) color = `rgba(0, 50, 200, ${alpha * 0.4})`;
+        else if (visRatio < 0.4) color = `rgba(0, 150, 255, ${alpha * 0.6})`;
+        else if (visRatio < 0.6) color = `rgba(0, 255, 200, ${alpha * 0.8})`;
+        else if (visRatio < 0.8) color = `rgba(255, 255, 0, ${alpha * 0.9})`;
+        else color = `rgba(255, 50, 0, ${alpha})`;
+
+        ctx.fillStyle = color;
+        ctx.fillRect(x, y, w, h);
     }
 
     _drawGrid(ctx) {
@@ -681,6 +745,7 @@ export class FootprintChart {
         ctx.lineWidth = 1;
         ctx.beginPath();
 
+        // Horizontal Grid (Price)
         const minPrice = this._getPriceFromY(chartHeight);
         const maxPrice = this._getPriceFromY(0);
         const step = tickSize * 10;
@@ -692,45 +757,42 @@ export class FootprintChart {
             ctx.lineTo(width, y);
         }
 
-        // Calculate step to avoid overlap. Time (30px) + Padding.
+        // Vertical Grid (Time) & Labels
         const labelWidth = 50;
-        const pixelStep = labelWidth;
-        const candleStep = Math.max(1, Math.ceil(pixelStep / zoomX));
-
+        const candleStep = Math.max(1, Math.ceil(labelWidth / zoomX));
         const startIdx = Math.floor(-offsetX / zoomX);
-        const endIdx = startIdx + (width / zoomX);
+        const endIdx = startIdx + (width / zoomX) + 1;
 
         for (let i = Math.floor(startIdx / candleStep) * candleStep; i <= endIdx; i += candleStep) {
             if (i < 0 || i >= this.candles.length) continue;
             const x = this._getX(i);
-            if (x < -50 || x > width + 50) continue;
 
+            // Grid Line
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x, chartHeight);
+
+            // Labels
             const candle = this.candles[i];
             if (candle && candle.time) {
                 const d = new Date(candle.time);
                 const tStr = `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
-                const dStr = `${d.getDate().toString().padStart(2, '0')}.${(d.getMonth() + 1).toString().padStart(2, '0')}`; // DD.MM
+                const dStr = `${d.getDate().toString().padStart(2, '0')}.${(d.getMonth() + 1).toString().padStart(2, '0')}`;
 
-                // Background Box REMOVED for cleaner look
-                // ctx.fillStyle = this.colors.bg;
-                // ctx.fillRect(x - 22, chartHeight - 32, 44, 28);
-
-                // Time (Top)
                 ctx.textAlign = 'center';
                 ctx.fillStyle = this.colors.textBright;
                 ctx.font = 'bold 11px sans-serif';
-                ctx.fillText(tStr, x, chartHeight - 18);
+                ctx.fillText(tStr, x, chartHeight + 14); // Below chart
 
-                // Date (Bottom)
-                ctx.fillStyle = '#888'; // Muted grey for date
+                ctx.fillStyle = '#888';
                 ctx.font = '10px sans-serif';
-                ctx.fillText(dStr, x, chartHeight - 6);
+                ctx.fillText(dStr, x, chartHeight + 26);
             }
         }
         ctx.stroke();
 
+        // Price Labels (Right Axis)
         ctx.fillStyle = this.colors.text;
-        ctx.font = '10px "Roboto Mono", monospace'; // Clean font
+        ctx.font = '10px "Roboto Mono", monospace';
         ctx.textAlign = 'right';
         for (let p = startPrice; p <= maxPrice; p += step) {
             const y = this._getY(p);
@@ -1362,7 +1424,12 @@ export class FootprintChart {
             // Calculate persistence score
             const expectedSamples = Math.max(1, Math.floor(trackingDuration / SAMPLE_INTERVAL));
             const actualSamples = entry.samples.length;
-            const persistence = Math.min(1, actualSamples / expectedSamples);
+            let persistence = Math.min(1, actualSamples / expectedSamples);
+
+            // Size-Weighted Persistence Bonus
+            // Boost persistence for very large walls (they are reliable even if flickering)
+            const sizeBonus = Math.min(0.3, entry.zone.totalSize / 200); // Up to +30% for 60+ BTC walls
+            persistence = Math.min(1, persistence + sizeBonus);
 
             // Check if meets persistence threshold
             const isActive = currentZoneKeys.has(key);
@@ -1377,25 +1444,57 @@ export class FootprintChart {
             // Only show qualified walls
             if (!entry.qualified) continue;
 
+            // SNAP-TO-GRID & DEAD BAND: Stabilize AVG Price for display
+            // We store a 'displayPrice' in the history entry.
+            // We ONLY update it if the new average moves > $50 away.
+            // This prevents the marker from "chasing" minor fluctuations.
+
+            if (!entry.displayPrice) {
+                // Initialize snapped to 10
+                entry.displayPrice = Math.round(entry.zone.avgPrice / 10) * 10;
+            } else {
+                // Only update if drift is significant (> $50)
+                const drift = Math.abs(entry.zone.avgPrice - entry.displayPrice);
+                if (drift > 50) {
+                    // Snap to new position
+                    entry.displayPrice = Math.round(entry.zone.avgPrice / 10) * 10;
+                }
+            }
+
+            const displayZone = { ...entry.zone, avgPrice: entry.displayPrice };
+
             // If qualified but now inactive/low persistence, start fade-out
             let opacity = 1.0;
             if (!isActive || persistence < MIN_PERSISTENCE) {
                 const timeSinceFail = timeSinceLastSeen;
-                opacity = Math.max(0.3, 1 - (timeSinceFail / FADEOUT_TIME));
+
+                // INTELLIGENT SMOOTHING: Dynamic Fadeout Time based on Wall Size
+                // Large walls (e.g., 50+ BTC) should have "stickier" memory to prevent flickering.
+                // Base: 15s. Bonus: 1s per 2 BTC size. Max: 60s.
+                // Examples: 
+                // 10 BTC -> 15 + 5 = 20s
+                // 50 BTC -> 15 + 25 = 40s
+                // 100 BTC -> 60s (capped)
+                const sizeBonusSec = (entry.zone.totalSize || 0) / 2;
+                const dynamicFadeTime = Math.min(60000, FADEOUT_TIME + (sizeBonusSec * 1000));
+
+                opacity = Math.max(0.3, 1 - (timeSinceFail / dynamicFadeTime));
 
                 // Remove if fully faded
-                if (opacity <= 0.3 && timeSinceFail > FADEOUT_TIME) {
+                if (opacity <= 0.3 && timeSinceFail > dynamicFadeTime) {
                     this._wallHistory.delete(key);
                     continue;
                 }
             }
 
             validatedZones.push({
-                ...entry.zone,
+                ...displayZone, // Use stabilized zone for display
+                rawPrice: entry.zone.avgPrice, // Keep raw price for logic if needed
                 opacity: opacity,
                 persistence: persistence,
                 isActive: isActive,
-                ageSeconds: Math.round((wallNow - entry.firstSeen) / 1000)
+                ageSeconds: Math.round((wallNow - entry.firstSeen) / 1000),
+                absorbed: entry.absorbed || 0
             });
         }
 
@@ -1514,38 +1613,80 @@ export class FootprintChart {
             ctx.fill();
             ctx.stroke();
 
-            // Draw persistence bar at bottom of marker
+            // Draw Wall Health Bar (Physical representation of wall state)
+            // Replaces simple persistence bar with a "Health Meter"
             const barWidth = markerWidth - 6;
-            const barHeight = 3;
+            const barHeight = 4; // Slightly thicker
             const barY = zoneY + dynamicHeight / 2 - barHeight - 2;
             const barX = markerX + 3;
 
-            // Background bar
-            ctx.fillStyle = 'rgba(0,0,0,0.3)';
+            // 1. Calculate Health & Pressure
+            // Base Health = Persistence (how stable it is)
+            // Damage = Absorption (trades eating the wall)
+
+            // Allow health to exceed 100% visually if it grew larger than initial seen
+            // But for the bar, we cap at 1.0 (full)
+            let healthRatio = persistence;
+
+            // Calculate "Damage" from absorption
+            // If we absorbed 10 BTC of a 50 BTC wall, that's 20% damage
+            const damageRatio = Math.min(1.0, zone.absorbed / (zone.totalSize || 1));
+            const remainingHealth = Math.max(0, healthRatio - damageRatio);
+
+            // 2. Draw Background (Empty / Void)
+            ctx.fillStyle = 'rgba(0,0,0,0.5)';
             ctx.fillRect(barX, barY, barWidth, barHeight);
 
-            // Filled bar based on persistence
-            const persistColor = persistence > 0.8 ? '#22c55e' : persistence > 0.5 ? '#eab308' : '#ef4444';
-            ctx.fillStyle = persistColor;
-            ctx.fillRect(barX, barY, barWidth * persistence, barHeight);
+            // 3. Draw Remaining Health (Green/Yellow)
+            const healthColor = remainingHealth > 0.7 ? '#22c55e' : remainingHealth > 0.3 ? '#eab308' : '#ef4444';
+            ctx.fillStyle = healthColor;
+            ctx.fillRect(barX, barY, barWidth * remainingHealth, barHeight);
+
+            // 4. Draw Damage (Red Flash) - Representing "eaten" wall
+            if (damageRatio > 0.01) {
+                const damageX = barX + (barWidth * remainingHealth);
+                ctx.fillStyle = '#b91c1c'; // Deep Red
+                ctx.fillRect(damageX, barY, barWidth * damageRatio, barHeight);
+            }
 
             // Draw size text
             ctx.font = 'bold 9px monospace';
             ctx.fillStyle = baseColor;
             ctx.textAlign = 'center';
             const sizeText = zone.totalSize >= 100 ? `${zone.totalSize.toFixed(0)}` : zone.totalSize.toFixed(1);
-            ctx.fillText(sizeText, markerX + markerWidth / 2, zoneY - 1);
+
+            // If heavily damaged, show size in RED
+            if (damageRatio > 0.5) ctx.fillStyle = '#ef4444';
+
+            ctx.fillText(sizeText, markerX + markerWidth / 2, zoneY - 2);
 
             // Draw age in smaller text
             ctx.font = '7px sans-serif';
             ctx.fillStyle = 'rgba(255,255,255,0.6)';
             const ageText = ageSeconds >= 60 ? `${Math.floor(ageSeconds / 60)}m` : `${ageSeconds}s`;
-            ctx.fillText(ageText, markerX + markerWidth / 2, zoneY + 8);
+
+            // Show Absorption text separate from Age
+            if (zone.absorbed > 0.1) {
+                // Flash if high absorption (>50% of wall size)
+                if (zone.absorbed > zone.totalSize * 0.5) {
+                    const flash = (Math.sin(Date.now() / 150) + 1) / 2; // 0..1
+                    ctx.fillStyle = `rgba(255, 100, 100, ${0.5 + flash * 0.5})`;
+                } else {
+                    ctx.fillStyle = '#ffaaaa';
+                }
+                const absText = zone.absorbed >= 1000 ? `${(zone.absorbed / 1000).toFixed(1)}K` : zone.absorbed.toFixed(0);
+
+                // Show below marker
+                ctx.textAlign = 'center';
+                ctx.fillText(`-${absText}`, markerX + markerWidth / 2, zoneY + dynamicHeight / 2 + 8);
+            } else {
+                ctx.fillText(ageText, markerX + markerWidth / 2, zoneY + dynamicHeight / 2 + 8);
+            }
 
             // Draw status icon
             const icon = zone.isActive ? '🛡️' : '👻';
-            ctx.font = '8px sans-serif';
-            ctx.fillText(icon, markerX + 8, zoneY - dynamicHeight / 2 + 8);
+            ctx.font = '9px sans-serif'; // Bigger icon
+            ctx.fillText(icon, markerX - 6, zoneY + 3); // Position to left of pill
 
             ctx.globalAlpha = 1.0; // Reset
         }
@@ -2086,6 +2227,18 @@ export class FootprintChart {
             }
         }
 
+        // Check ML Signal Hover
+        if (this.hoveredCandle) {
+            const signal = this.mlHistory.get(this.hoveredCandle.time);
+            if (signal !== this.hoveredSignal) {
+                this.hoveredSignal = signal;
+                this.requestDraw();
+            }
+        } else if (this.hoveredSignal) {
+            this.hoveredSignal = null;
+            this.requestDraw();
+        }
+
         if (this.isDragging || this.isDraggingPrice || this.isDraggingTime || this.showLens) {
             this.lastX = x;
             this.lastY = y;
@@ -2111,6 +2264,133 @@ export class FootprintChart {
             this.canvas.height = this.height;
             this.requestDraw();
         }).observe(this.container);
+    }
+
+    _drawHistoricalSignals(ctx) {
+        if (this.mlHistory.size === 0) return;
+
+        const { width, height } = this;
+        const startIdx = Math.floor(-this.offsetX / this.zoomX);
+        const endIdx = startIdx + Math.ceil(width / this.zoomX) + 1;
+
+        const actualStart = Math.max(0, startIdx);
+        const actualEnd = Math.min(this.candles.length - 1, endIdx);
+
+        ctx.save();
+        ctx.font = 'bold 11px sans-serif';
+        ctx.textAlign = 'center';
+
+        for (let i = actualStart; i <= actualEnd; i++) {
+            const candle = this.candles[i];
+            if (!candle) continue;
+
+            const signal = this.mlHistory.get(candle.time);
+            if (!signal) continue;
+
+            const x = this._getX(i) + (this.zoomX / 2); // Center of candle
+
+            // Draw Signal Marker (Long)
+            // Arrow below Low
+            const y = this._getY(candle.low) + 20;
+
+            // Determine Color based on Win/Loss (if we knew outcome) or just Signal type
+            ctx.fillStyle = '#00e676'; // Bright Green
+
+            // Draw Arrow Up
+            ctx.beginPath();
+            ctx.moveTo(x, y);
+            ctx.lineTo(x - 5, y + 8);
+            ctx.lineTo(x + 5, y + 8);
+            ctx.fill();
+
+            // Text Label
+            ctx.fillStyle = '#00e676';
+            ctx.fillText('ENTRY', x, y + 20);
+
+            // Draw REJECTION text if it was a rejection setup
+            if (signal.setupType === 'Support Bounce') {
+                const rejectionY = this._getY(candle.low) + 32;
+                ctx.fillStyle = '#ffffff';
+                ctx.font = 'bold 9px monospace';
+                ctx.fillText('REJECTION', x, rejectionY);
+            }
+
+            // Draw Hover Details
+            if (this.hoveredSignal === signal) {
+                this._drawSignalDetails(ctx, signal, i);
+            }
+        }
+
+        ctx.restore();
+    }
+
+    _drawSignalDetails(ctx, signal, startIndex) {
+        // Calculate Outcome
+        let outcome = 'RUNNING';
+        let exitIndex = this.candles.length - 1;
+
+        for (let k = startIndex + 1; k < this.candles.length; k++) {
+            const h = this.candles[k].high;
+            const l = this.candles[k].low;
+
+            if (l <= signal.sl) {
+                outcome = 'LOSS';
+                exitIndex = k;
+                break;
+            }
+            if (h >= signal.tp) {
+                outcome = 'WIN';
+                exitIndex = k;
+                break;
+            }
+        }
+
+        // Colors
+        const isWin = outcome === 'WIN';
+        const isLoss = outcome === 'LOSS';
+        const mainColor = isWin ? '#00e676' : (isLoss ? '#ef4444' : '#00bcd4');
+        const bgColor = isWin ? 'rgba(0, 230, 118, 0.1)' : (isLoss ? 'rgba(239, 68, 68, 0.1)' : 'rgba(0, 188, 212, 0.1)');
+
+        // Draw Background Box
+        const startX = this._getX(startIndex) + this.zoomX / 2;
+        const endX = this._getX(exitIndex) + this.zoomX / 2;
+        const entryY = this._getY(signal.entry);
+        const targetY = this._getY(isLoss ? signal.sl : signal.tp);
+
+        ctx.fillStyle = bgColor;
+        ctx.fillRect(startX, Math.min(entryY, targetY), endX - startX, Math.abs(entryY - targetY));
+
+        // Draw Lines
+        this.drawLevel(ctx, signal.entry, mainColor, 'ENTRY', startX, endX, false);
+        this.drawLevel(ctx, signal.tp, isWin ? '#00e676' : '#555', `TP: ${signal.tp.toFixed(1)}`, startX, endX, true);
+        this.drawLevel(ctx, signal.sl, isLoss ? '#ef4444' : '#555', `SL: ${signal.sl.toFixed(1)}`, startX, endX, true);
+
+        // Result Label
+        if (outcome !== 'RUNNING') {
+            ctx.font = 'bold 12px sans-serif';
+            ctx.fillStyle = mainColor;
+            ctx.fillText(outcome, endX + 25, (entryY + targetY) / 2);
+        }
+    }
+
+    drawLevel(ctx, price, color, label, x1, x2, dashed) {
+        const y = this._getY(price);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.5;
+        if (dashed) ctx.setLineDash([4, 4]);
+        else ctx.setLineDash([]);
+
+        ctx.beginPath();
+        ctx.moveTo(x1, y);
+        ctx.lineTo(x2, y);
+        ctx.stroke();
+
+        ctx.setLineDash([]);
+
+        // Label
+        ctx.fillStyle = color;
+        ctx.font = '10px sans-serif';
+        ctx.fillText(label, x1 + 5, y - 4);
     }
 
     _drawTradePlan(ctx) {
