@@ -674,6 +674,16 @@ class CryptoFlowApp {
 
                         // Update charts immediately
                         this._updateCharts();
+
+                        // FORCE center after a delay to ensure layout is complete
+                        setTimeout(() => {
+                            if (this.footprintChart && this.footprintChart.candles.length > 0) {
+                                const lastCandle = this.footprintChart.candles[this.footprintChart.candles.length - 1];
+                                this.footprintChart.currentPrice = lastCandle.close;
+                                this.footprintChart.resetView();
+                                console.log('Forced center after load:', lastCandle.close);
+                            }
+                        }, 300);
                     } else {
                         throw new Error('VPS returned 0 candles');
                     }

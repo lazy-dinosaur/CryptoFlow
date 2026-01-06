@@ -168,8 +168,8 @@ export class FootprintChart {
             (this.candles.length > oldCandles.length * 2);
 
         if (isNewDataset) {
-            // Update current price from last candle if not set
-            if (!this.currentPrice && this.candles.length > 0) {
+            // ALWAYS set current price from last candle when loading new data
+            if (this.candles.length > 0) {
                 this.currentPrice = this.candles[this.candles.length - 1].close;
             }
             this.resetView();
@@ -203,10 +203,17 @@ export class FootprintChart {
 
     updatePrice(price) {
         this.currentPrice = price;
-        if (!this.initialCenterDone && price > 0 && this.height > 0) {
+
+        // Try to complete any pending centering
+        this._completePendingCenter();
+
+        // Fallback auto-center on first price if not done yet
+        const chartHeight = this.height - this._deltaH();
+        if (!this.initialCenterDone && price > 0 && chartHeight > 100) {
             this.initialCenterDone = true;
-            this.offsetY = (this.height / 2) - (price / this.tickSize * this.zoomY);
-            console.log('Auto-centered at', price);
+            const priceInPixels = price / this.tickSize * this.zoomY;
+            this.offsetY = chartHeight / 2 - priceInPixels;
+            console.log('Auto-centered at', price, 'chartHeight', chartHeight);
         }
         this.requestDraw();
     }
@@ -282,12 +289,49 @@ export class FootprintChart {
     }
 
     resetView() {
-        this.offsetX = 0; // Jump to latest time
-        this.initialCenterDone = false; // Allow next price update to auto-center Y
-        if (this.currentPrice) {
-            this.offsetY = (this.height / 2) - (this.currentPrice / this.tickSize * this.zoomY);
-            this.initialCenterDone = true; // Center immediately if price is known
+        this.offsetX = 0; // Jump to latest time (horizontal: show latest candles)
+        this.initialCenterDone = false;
+
+        // Calculate chart area height (excluding bottom panels like Delta, CVD, Time axis)
+        const deltaH = this._deltaH();
+        const chartHeight = this.height - deltaH;
+
+        // Only center vertically if we have a valid chart height AND price
+        if (this.currentPrice && chartHeight > 100) {
+            // Center the current price in the middle of the CHART AREA
+            const priceInPixels = this.currentPrice / this.tickSize * this.zoomY;
+            this.offsetY = chartHeight / 2 - priceInPixels;
+            this.initialCenterDone = true;
+            console.log('resetView centered:', {
+                price: this.currentPrice,
+                chartHeight,
+                deltaH,
+                priceInPixels,
+                offsetY: this.offsetY
+            });
+        } else {
+            // Defer centering until height is available
+            this._pendingCenter = true;
+            console.log('resetView deferred - chartHeight:', chartHeight, 'price:', this.currentPrice);
         }
+
+        this.requestDraw();
+    }
+
+    // Called from ResizeObserver or when price updates to complete deferred centering
+    _completePendingCenter() {
+        if (!this._pendingCenter) return;
+
+        const deltaH = this._deltaH();
+        const chartHeight = this.height - deltaH;
+
+        if (!this.currentPrice || chartHeight <= 100) return;
+
+        const priceInPixels = this.currentPrice / this.tickSize * this.zoomY;
+        this.offsetY = chartHeight / 2 - priceInPixels;
+        this.initialCenterDone = true;
+        this._pendingCenter = false;
+        console.log('Deferred center completed:', { price: this.currentPrice, offsetY: this.offsetY });
         this.requestDraw();
     }
 
@@ -702,36 +746,11 @@ export class FootprintChart {
         const totalCandles = this.candles.length;
         const isLiveCandle = (i) => i === totalCandles - 1; // The rightmost forming candle
 
-        // 0. Auto-Contrast: Calculate Max Volume based on VISIBLE timestamps
-        // STABILIZATION: Enforce a minimum floor relative to threshold to prevent noise amplification
+        // Use GLOBAL maxVolumeInHistory for consistent rendering at all zoom levels
+        // This prevents the heatmap from becoming too dense when zoomed in
+        // or too sparse when zoomed out
         const minFloor = (this.liquidityThreshold || 10) * 20; // e.g. 200 BTC minimum scale
-        let visibleMaxVol = minFloor;
-
-        if (hLen > 0) {
-            const actualStartIdx = Math.max(0, startIdx);
-            const actualEndIdx = Math.min(totalCandles - 1, endIdx);
-
-            if (this.candles[actualStartIdx]) {
-                // Look wider (10 mins back) to prevent flickering when panning
-                const startT = this.candles[actualStartIdx].time - 600000;
-                const endT = (this.candles[actualEndIdx]?.time || Date.now()) + 60000;
-
-                // Binary search start index in heatmap
-                let low = 0, high = hLen - 1;
-                let sIdx = 0;
-                while (low <= high) {
-                    const mid = (low + high) >>> 1;
-                    if (this.heatmapData[mid].time < startT) low = mid + 1;
-                    else { sIdx = mid; high = mid - 1; }
-                }
-
-                for (let k = sIdx; k < hLen; k++) {
-                    const s = this.heatmapData[k];
-                    if (s.time > endT) break;
-                    if (s.maxVolume > visibleMaxVol) visibleMaxVol = s.maxVolume;
-                }
-            }
-        }
+        const visibleMaxVol = Math.max(this.maxVolumeInHistory || 5000, minFloor);
 
         for (let i = startIdx; i <= endIdx; i++) {
             // Find candle
@@ -2487,11 +2506,18 @@ export class FootprintChart {
             this.canvas.width = this.width;
             this.canvas.height = this.height;
 
-            // Auto-center vertically when height first becomes available
-            // or when height changes significantly (e.g., from 0 to actual size)
-            if (prevHeight === 0 && this.height > 0 && this.currentPrice) {
-                this.offsetY = (this.height / 2) - (this.currentPrice / this.tickSize * this.zoomY);
+            // Complete any pending centering when height becomes available
+            const chartHeight = this.height - this._deltaH();
+            if (chartHeight > 100) {
+                this._completePendingCenter();
+            }
+
+            // Also try auto-center if first time getting valid size
+            if (prevHeight <= 100 && this.height > 100 && this.currentPrice && !this.initialCenterDone) {
+                const priceInPixels = this.currentPrice / this.tickSize * this.zoomY;
+                this.offsetY = chartHeight / 2 - priceInPixels;
                 this.initialCenterDone = true;
+                console.log('ResizeObserver centered at', this.currentPrice, 'chartHeight', chartHeight);
             }
 
             this.requestDraw();
