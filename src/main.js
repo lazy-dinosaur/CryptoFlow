@@ -62,18 +62,12 @@ class CryptoFlowApp {
 
         // Tick sizes for different symbols
         this.tickSizes = {
-            btcusdt: 10,
-            ethusdt: 1,
-            solusdt: 0.1,
-            bnbusdt: 0.1
+            btcusdt: 10
         };
 
         // Big trade thresholds (whale markers)
         this.bigTradeThresholds = {
-            btcusdt: 20.0,   // 20 BTC = whale (User Default)
-            ethusdt: 50.0,   // 50 ETH = whale
-            solusdt: 500.0,  // 500 SOL = whale
-            bnbusdt: 100.0   // 100 BNB = whale
+            btcusdt: 20.0   // 20 BTC = whale (User Default)
         };
 
         // Historical data settings
