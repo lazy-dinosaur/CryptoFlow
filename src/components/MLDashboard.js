@@ -39,16 +39,16 @@ export class MLDashboard {
         document.body.appendChild(this.container);
 
         this.container.innerHTML = `
-            <div class="ml-dashboard">
+            <div class="ml-dashboard" style="border-color: #555;">
                 <div class="ml-header" id="mlHeader">
-                    <span class="ml-icon">🤖</span>
-                    <span class="ml-title">ML Signal AI</span>
-                    <span class="ml-badge" id="mlBadge">--</span>
+                    <span class="ml-icon">🔒</span>
+                    <span class="ml-title">AI Disabled</span>
+                    <span class="ml-badge" id="mlBadge" style="background: #333;">OFF</span>
                     <span class="ml-expand">▼</span>
                 </div>
                 <div class="ml-content" id="mlContent" style="display: none;">
-                    <div class="ml-stats" id="mlStats">
-                        Loading...
+                    <div style="padding: 10px; color: #aaa; text-align: center;">
+                        AI Features are currently disabled.
                     </div>
                 </div>
             </div>
@@ -68,8 +68,13 @@ export class MLDashboard {
             });
         }
 
-        console.log('MLDashboard initialized (Dynamic Overlay Mode)');
+        console.log('MLDashboard initialized (AI DISABLED)');
         this.setVisible(true);
+    }
+
+    _startPolling() {
+        // AI Disabled - No polling
+        return;
     }
 
     _addStyles() {
@@ -216,8 +221,34 @@ export class MLDashboard {
             
             /* FAILSAFE HIDDEN CLASS */
             .hidden { display: none !important; }
+
+            .ml-btn-ai {
+                background: linear-gradient(135deg, #6200ea, #b388ff);
+                border: 1px solid rgba(179, 136, 255, 0.5);
+                color: #fff;
+                margin-top: 8px;
+            }
+            .ml-btn-ai:hover {
+                background: linear-gradient(135deg, #7c4dff, #d1c4e9);
+                box-shadow: 0 0 10px rgba(98, 0, 234, 0.5);
+                color: #fff;
+            }
+            
+            .ai-result {
+                margin-top: 10px;
+                padding: 8px;
+                background: rgba(98, 0, 234, 0.1);
+                border-left: 3px solid #b388ff;
+                font-size: 11px;
+                color: #e1bee7;
+                white-space: pre-wrap;
+            }
         `;
         document.head.appendChild(style);
+    }
+
+    setChart(chart) {
+        this.chart = chart;
     }
 
     async _fetchStatus() {
@@ -233,17 +264,11 @@ export class MLDashboard {
         }
     }
 
-    _startPolling() {
-        this._fetchStatus().finally(() => {
-            // Adaptive polling: 60s if error/offline, 30s if active
-            const delay = this.status && this.status.error ? 60000 : 30000;
-            this.pollTimeout = setTimeout(() => this._startPolling(), delay);
-        });
-    }
+    // NOTE: Second _startPolling was removed - AI is disabled
 
     _updateUI() {
         const badge = document.getElementById('mlBadge');
-        const stats = document.getElementById('mlStats');
+        const stats = document.getElementById('mlModelStatus');
 
         if (!this.status || this.status.error) {
             badge.textContent = 'Offline';
@@ -311,34 +336,111 @@ export class MLDashboard {
             </div>
             ${historyHtml}
             <button class="ml-btn" id="mlTrainBtn">🔄 Manuelles Training</button>
+            <button class="ml-btn ml-btn-ai" id="aiAnalystBtn">✨ AI Analyst</button>
+            ${this.lastAIResult ? `
+                <div class="ai-result">
+                    <strong>🤖 AI Analyst:</strong><br/>
+                    ${this.lastAIResult.explanation}
+                    ${this.lastAIResult.trade ? `<br/><br/><strong>SETUP:</strong> ${this.lastAIResult.action} @ ${this.lastAIResult.trade.entry}` : ''}
+                    <div style="margin-top:4px; font-weight:bold; color: ${this.lastAIResult.action === 'BUY' ? '#00e676' : (this.lastAIResult.action === 'SELL' ? '#ff5252' : '#ffd700')}">
+                        Action: ${this.lastAIResult.action}
+                    </div>
+                </div>
+            ` : ''}
         `;
 
-        // Add train button handler logic
+        this._attachListeners(stats);
+    }
+
+    _attachListeners(stats) {
+        // Train Button
         const trainBtn = stats.querySelector('#mlTrainBtn');
         if (trainBtn) {
             trainBtn.addEventListener('click', async (e) => {
-                console.log('Train button clicked');
                 const btn = e.target;
                 btn.disabled = true;
                 btn.textContent = '⏳ Training läuft...';
-
                 try {
-                    console.log(`Calling ${this.apiUrl}/train`);
-                    const response = await fetch(`${this.apiUrl}/train`, {
-                        headers: {
-                            'x-api-key': 'CryptoFlowMasterKey2025!'
-                        }
-                    });
-                    const data = await response.json();
-                    console.log('Training response:', data);
+                    await fetch(`${this.apiUrl}/train`, { headers: { 'x-api-key': 'CryptoFlowMasterKey2025!' } });
                     await this._fetchStatus();
                 } catch (error) {
-                    console.error('Training failed:', error);
                     alert('Training failed: ' + error.message);
+                }
+                btn.disabled = false;
+                btn.textContent = '🔄 Manuelles Training';
+            });
+        }
+
+        // AI Button
+        const aiBtn = stats.querySelector('#aiAnalystBtn');
+        if (aiBtn) {
+            aiBtn.addEventListener('click', async (e) => {
+                if (!this.chart) { alert("Chart not linked!"); return; }
+                const btn = e.target;
+                const originalText = btn.textContent;
+                btn.disabled = true;
+                btn.textContent = '🤖 Thinking...';
+
+                try {
+                    // Capture Chart
+                    const imgData = this.chart.canvas.toDataURL('image/png');
+                    const context = {
+                        symbol: this.chart.parentApp ? this.chart.parentApp.currentSymbol : 'BTCUSDT',
+                        price: this.chart.currentPrice,
+                        timeframe: this.chart.parentApp ? this.chart.parentApp.currentTimeframe : 1
+                    };
+
+                    const response = await fetch('/api/ai/analyze', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ image: imgData, context })
+                    });
+
+                    if (!response.ok) {
+                        if (response.status === 404) {
+                            throw new Error("Server Update Required! Please restart 'ml_service.py' on VPS.");
+                        }
+                        const errText = await response.text();
+                        let errMsg = response.statusText;
+                        try {
+                            const errJson = JSON.parse(errText);
+                            if (errJson.error) errMsg = errJson.error;
+                        } catch (e) { errMsg = errText.substring(0, 100); }
+
+                        throw new Error(`AI Error (${response.status}): ${errMsg}`);
+                    }
+
+                    const result = await response.json();
+
+                    this.lastAIResult = result;
+
+                    if (this.chart.setAISignal) { // Pass user intention signal
+                        // If AI returns a trade, we visualize it
+                        if (result.trade) {
+                            // Normalize trade object
+                            const aiSig = {
+                                type: result.action, // BUY/SELL
+                                entry: result.trade.entry,
+                                sl: result.trade.sl,
+                                tp: result.trade.tp,
+                                timestamp: Date.now(),
+                                source: 'AI'
+                            };
+                            this.chart.setAISignal(aiSig);
+                        } else {
+                            this.chart.setAISignal(null);
+                        }
+                    }
+
+                    this._updateUI(); // Re-render to show result
+
+                } catch (error) {
+                    console.error(error);
+                    alert("AI Error: " + error.message);
                 }
 
                 btn.disabled = false;
-                btn.textContent = '🔄 Manuelles Training';
+                btn.textContent = originalText;
             });
         }
     }
@@ -412,18 +514,86 @@ export class MLDashboard {
 
     async backtestHistory(candles) {
         try {
+            console.log("Requesting backtest for", candles.length, "candles");
             const response = await fetch(`${this.apiUrl}/backtest`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ candles })
             });
-            if (!response.ok) throw new Error(response.statusText);
+
+            if (!response.ok) throw new Error('Backtest failed');
+
             const data = await response.json();
-            return data.signals || [];
+
+            // Handle new format { signals, stats } or old format [signals]
+            let signals = [];
+            let stats = null;
+
+            if (data.signals) {
+                signals = data.signals;
+                stats = data.stats;
+            } else if (Array.isArray(data)) {
+                signals = data;
+            }
+
+            console.log("Backtest received:", signals.length, "signals");
+
+            // Update Statistics UI if available
+            if (stats) {
+                this._renderStats(stats);
+            }
+
+            return signals;
         } catch (error) {
             console.error('Backtest error:', error);
             return [];
         }
+    }
+
+    _renderStats(stats) {
+        const container = this.container.querySelector('#mlBacktestStats');
+        if (!container) return;
+
+        // Calculate WIN Rate colors
+        const getWinRateColor = (rate) => {
+            if (rate >= 60) return '#00ff80'; // Green
+            if (rate >= 50) return '#ffd700'; // Gold
+            return '#ff4444'; // Red
+        };
+
+        const botColor = getWinRateColor(stats.botWinRate);
+        const mlColor = getWinRateColor(stats.mlWinRate);
+
+        container.innerHTML = `
+            <div style="display: flex; gap: 15px; padding: 10px; font-size: 13px;">
+                <div style="flex: 1; text-align: center; border-right: 1px solid rgba(255,255,255,0.1);">
+                    <div style="color: #888; margin-bottom: 4px;">🛡️ Bot Signals</div>
+                    <div style="font-size: 16px; font-weight: bold; color: ${botColor}">
+                        ${stats.botWinRate.toFixed(1)}%
+                    </div>
+                    <div style="font-size: 10px; opacity: 0.7;">
+                        ${stats.botWins}/${stats.botTotal} Wins
+                    </div>
+                </div>
+                <div style="flex: 1; text-align: center;">
+                    <div style="color: #888; margin-bottom: 4px;">🤖 ML Signals</div>
+                    <div style="font-size: 16px; font-weight: bold; color: ${mlColor}">
+                        ${stats.mlWinRate.toFixed(1)}%
+                    </div>
+                     <div style="font-size: 10px; opacity: 0.7;">
+                        ${stats.mlWins}/${stats.mlTotal} Wins
+                    </div>
+                </div>
+            </div>
+            <div style="padding: 8px; border-top: 1px solid rgba(255,255,255,0.1); text-align: center; font-size: 11px; color: #666;">
+                Total Signals: ${stats.total} | Overall WR: ${stats.winRate.toFixed(1)}%
+            </div>
+        `;
+
+        // Ensure content is visible
+        const content = this.container.querySelector('#mlContent');
+        if (content) content.style.display = 'block';
+        this.expanded = true;
     }
 
     /**

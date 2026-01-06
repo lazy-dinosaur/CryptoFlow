@@ -20,38 +20,176 @@
     <div class="loading-text">Connecting to Binance...</div>
   </div>
 
-  <!-- Help Overlay -->
+  <!-- Help Overlay (Press ? to open) -->
   <div id="helpOverlay" class="help-overlay hidden">
     <div class="help-modal">
       <div class="help-header">
-        <h2>⌨️ Keyboard Shortcuts</h2>
+        <h2>📊 CryptoFlow Guide</h2>
         <button class="help-close" id="helpClose">✕</button>
       </div>
       <div class="help-content">
+        <!-- What is this -->
         <div class="shortcut-group">
-          <h3>Navigation</h3>
-          <div class="shortcut"><kbd>Drag</kbd> Pan chart</div>
-          <div class="shortcut"><kbd>Scroll</kbd> Pan horizontal</div>
-          <div class="shortcut"><kbd>Ctrl + Scroll</kbd> Zoom in/out</div>
-          <div class="shortcut"><kbd>Double-Click</kbd> Reset view</div>
+          <h3>Was ist CryptoFlow?</h3>
+          <p style="color:#aaa;font-size:13px;line-height:1.5;margin-bottom:12px;">
+            CryptoFlow ist ein <strong>Order Flow Analyse Tool</strong> für Krypto-Trader.
+            Es zeigt dir in Echtzeit, wo große Käufer und Verkäufer aktiv sind,
+            und hilft dir, institutionelle Bewegungen zu erkennen.
+          </p>
         </div>
+
+        <!-- Features -->
         <div class="shortcut-group">
-          <h3>Controls</h3>
-          <div class="shortcut"><kbd>Space</kbd> Toggle auto-scroll (LIVE/PAUSED)</div>
-          <div class="shortcut"><kbd>R</kbd> Reset view</div>
-          <div class="shortcut"><kbd>+</kbd> / <kbd>-</kbd> Zoom in / out</div>
+          <h3>🔥 Haupt-Features</h3>
+          <div class="shortcut"><strong>Footprint Chart</strong> – Bid/Ask Volumen pro Preislevel</div>
+          <div class="shortcut"><strong>Heatmap</strong> – Liquidität im Orderbook visualisiert</div>
+          <div class="shortcut"><strong>Delta & CVD</strong> – Kauf- vs. Verkaufsdruck</div>
+          <div class="shortcut"><strong>Volume Profile</strong> – Wo wurde am meisten gehandelt</div>
         </div>
+
+        <!-- Navigation -->
         <div class="shortcut-group">
-          <h3>Display</h3>
-          <div class="shortcut"><kbd>H</kbd> Toggle Heatmap</div>
-          <div class="shortcut"><kbd>C</kbd> Toggle Crosshair</div>
-          <div class="shortcut"><kbd>I</kbd> Toggle Imbalances</div>
-          <div class="shortcut"><kbd>D</kbd> Toggle Delta</div>
-          <div class="shortcut"><kbd>?</kbd> Show this help</div>
+          <h3>⌨️ Tastenkombinationen</h3>
+          <div class="shortcut"><kbd>Drag</kbd> Chart verschieben</div>
+          <div class="shortcut"><kbd>Scroll</kbd> Horizontal navigieren</div>
+          <div class="shortcut"><kbd>Ctrl + Scroll</kbd> Zoomen</div>
+          <div class="shortcut"><kbd>Double-Click</kbd> Ansicht zurücksetzen</div>
+          <div class="shortcut"><kbd>Space</kbd> LIVE / PAUSED umschalten</div>
+          <div class="shortcut"><kbd>H</kbd> Heatmap ein/aus</div>
+          <div class="shortcut"><kbd>I</kbd> Imbalances ein/aus</div>
+          <div class="shortcut"><kbd>D</kbd> Delta ein/aus</div>
+          <div class="shortcut"><kbd>L</kbd> Magnifier Lens (Lupe) ein/aus</div>
+          <div class="shortcut"><kbd>?</kbd> Diese Hilfe anzeigen</div>
+        </div>
+
+        <!-- Tips -->
+        <div class="shortcut-group">
+          <h3>💡 Tipps</h3>
+          <div class="shortcut">• Nutze das ⚙️ Symbol für erweiterte Einstellungen</div>
+          <div class="shortcut">• Die Heatmap zeigt wo große Limit-Orders liegen</div>
+          <div class="shortcut">• Imbalances (3:1 Ratio) deuten auf Momentum hin</div>
         </div>
       </div>
     </div>
   </div>
+
+  <!-- Cookie Consent Banner (dezent, unten) -->
+  <div id="cookieBanner" class="cookie-banner" style="display:none;">
+    <div class="cookie-content">
+      <span>🍪 Diese Seite nutzt anonyme Analytics, um die Nutzung zu verstehen. Keine persönlichen Daten werden
+        gespeichert.</span>
+      <div class="cookie-buttons">
+        <button id="cookieAccept" class="cookie-btn accept">OK</button>
+        <button id="cookieDecline" class="cookie-btn decline">Ablehnen</button>
+      </div>
+    </div>
+  </div>
+
+  <style>
+    .cookie-banner {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      background: rgba(18, 18, 26, 0.95);
+      border-top: 1px solid rgba(255, 255, 255, 0.1);
+      padding: 12px 20px;
+      z-index: 9999;
+      backdrop-filter: blur(10px);
+    }
+
+    .cookie-content {
+      max-width: 1200px;
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      flex-wrap: wrap;
+    }
+
+    .cookie-content span {
+      color: #aaa;
+      font-size: 13px;
+    }
+
+    .cookie-buttons {
+      display: flex;
+      gap: 10px;
+    }
+
+    .cookie-btn {
+      padding: 8px 16px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      transition: all 0.2s;
+    }
+
+    .cookie-btn.accept {
+      background: #4fc3f7;
+      color: #000;
+    }
+
+    .cookie-btn.decline {
+      background: transparent;
+      color: #888;
+      border: 1px solid #333;
+    }
+
+    .cookie-btn:hover {
+      opacity: 0.8;
+    }
+  </style>
+
+  <script>
+    // Wait for DOM to be ready before attaching event listeners
+    document.addEventListener('DOMContentLoaded', function () {
+      // Cookie Consent Logic
+      const consent = localStorage.getItem('cf_cookie_consent');
+      if (!consent) {
+        const banner = document.getElementById('cookieBanner');
+        if (banner) banner.style.display = 'block';
+      }
+
+      document.getElementById('cookieAccept')?.addEventListener('click', function () {
+        localStorage.setItem('cf_cookie_consent', 'accepted');
+        document.getElementById('cookieBanner').style.display = 'none';
+      });
+
+      document.getElementById('cookieDecline')?.addEventListener('click', function () {
+        localStorage.setItem('cf_cookie_consent', 'declined');
+        document.getElementById('cookieBanner').style.display = 'none';
+        window.CryptoFlowAnalytics = { disabled: true };
+      });
+
+      // Help Button Logic
+      document.getElementById('helpBtn')?.addEventListener('click', function () {
+        document.getElementById('helpOverlay')?.classList.remove('hidden');
+      });
+
+      document.getElementById('helpClose')?.addEventListener('click', function () {
+        document.getElementById('helpOverlay')?.classList.add('hidden');
+      });
+
+      document.getElementById('helpOverlay')?.addEventListener('click', function (e) {
+        if (e.target === this) {
+          this.classList.add('hidden');
+        }
+      });
+
+      // Keyboard shortcut for help (?)
+      document.addEventListener('keydown', function (e) {
+        if (e.key === '?' && !e.target.matches('input, textarea, select')) {
+          document.getElementById('helpOverlay')?.classList.toggle('hidden');
+        }
+        if (e.key === 'Escape') {
+          document.getElementById('helpOverlay')?.classList.add('hidden');
+        }
+      });
+    });
+  </script>
 
   <div id="app">
     <!-- Header -->
@@ -77,6 +215,7 @@
         </div>
       </div>
       <div class="header-right">
+        <button class="help-btn" id="helpBtn" title="Hilfe (?)">?</button>
         <div class="connection-status" id="connectionStatus">
           <span class="status-dot"></span>
           <span class="status-text">Disconnected</span>
@@ -193,6 +332,11 @@
         <span class="stat-label">POC</span>
         <span class="stat-value" id="pocValue">--</span>
       </div>
+      <div class="footer-links">
+        <a href="/impressum.html" target="_blank">📜 Impressum</a>
+        <span>•</span>
+        <a href="https://www.linkedin.com/in/dogancan-kaya-016b21204/" target="_blank" rel="noopener">🔗 LinkedIn</a>
+      </div>
     </footer>
   </div>
 
@@ -293,6 +437,7 @@
   </div>
 
   <script type="module" src="/src/main.js"></script>
+  <script src="/analytics.js" defer></script>
 </body>
 
 </html>

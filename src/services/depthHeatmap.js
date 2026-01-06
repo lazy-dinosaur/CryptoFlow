@@ -21,11 +21,36 @@ export class DepthHeatmapStore {
         // Statistics for relative coloring
         this.maxVolumeInHistory = 5000;
 
+        // ========== CRATER SYSTEM ==========
+        // Tracks historical max volume at each price level
+        this.craters = new Map(); // price -> { maxVolume, lastSeen, decayedVolume }
+        this.craterDecayRate = 0.98; // Faster decay (was 0.995)
+        this.craterMinVolume = 15; // Higher threshold - only significant walls (was 5)
+        this.maxCraters = 5; // Only show top 5 craters to reduce noise
+        this.lastCraterUpdate = Date.now();
+
+        // ========== SMOOTHING SYSTEM ==========
+        // Rolling average of wall volumes to reduce jumping
+        this.wallHistory = []; // Last N wall snapshots
+        this.wallHistorySize = 5; // Average over 5 samples
+        this.smoothedWalls = []; // Current smoothed wall values
+
+        // ========== DYNAMIC THRESHOLD SYSTEM ==========
+        // Calculate threshold as % of recent total orderbook volume
+        this.recentVolumeRatio = 0.10; // Wall must be > 10% of recent avg volume
+        this.minVolumeFloor = 5; // Absolute minimum in BTC
+        this.recentTotalVolumes = []; // Track recent orderbook totals
+        this.recentVolumeSamples = 10; // Average over 10 samples
+
+        // ========== ZONE CLUSTERING ==========
+        // Cluster nearby price levels into zones
+        this.zoneMergeThreshold = 0.001; // Merge if within 0.1% of each other
+
         // Persistence
         this.pendingSnapshots = []; // Snapshots to upload
         this._loadHistory();
         this._startSync();
-
+        this._startCraterDecay();
     }
 
     /**
@@ -250,6 +275,225 @@ export class DepthHeatmapStore {
     }
 
     /**
+     * Start crater decay timer - craters slowly fade over time
+     */
+    _startCraterDecay() {
+        setInterval(() => {
+            const now = Date.now();
+            const elapsed = (now - this.lastCraterUpdate) / 1000; // seconds
+            this.lastCraterUpdate = now;
+
+            // Decay all craters
+            const decay = Math.pow(this.craterDecayRate, elapsed);
+            for (const [price, crater] of this.craters.entries()) {
+                crater.decayedVolume *= decay;
+
+                // Remove if too small
+                if (crater.decayedVolume < this.craterMinVolume * 0.5) {
+                    this.craters.delete(price);
+                }
+            }
+        }, 1000);
+    }
+
+    /**
+     * Update craters when we see volume at a price level
+     * Called during wall detection
+     */
+    _updateCraters(walls) {
+        const now = Date.now();
+
+        for (const wall of walls) {
+            const price = wall.price;
+            const volume = wall.volume;
+
+            if (volume < this.craterMinVolume) continue;
+
+            const existing = this.craters.get(price);
+            if (existing) {
+                // Update if new volume is higher
+                if (volume > existing.maxVolume) {
+                    existing.maxVolume = volume;
+                    existing.decayedVolume = volume;
+                }
+                existing.lastSeen = now;
+            } else {
+                // Create new crater
+                this.craters.set(price, {
+                    maxVolume: volume,
+                    decayedVolume: volume,
+                    lastSeen: now
+                });
+            }
+        }
+    }
+
+    /**
+     * Get smoothed walls with crater indicators
+     * Returns walls that are stable (averaged) + crater markers for historical max
+     */
+    getSmoothedWalls(options = {}) {
+        // Get current raw walls
+        const rawWalls = this.getTopWalls(options);
+
+        // Update craters with current wall data
+        this._updateCraters(rawWalls);
+
+        // Calculate dynamic threshold from recent orderbook volume
+        const totalVolume = rawWalls.reduce((sum, w) => sum + w.volume, 0);
+        this.recentTotalVolumes.push(totalVolume);
+        while (this.recentTotalVolumes.length > this.recentVolumeSamples) {
+            this.recentTotalVolumes.shift();
+        }
+        const avgTotalVolume = this.recentTotalVolumes.reduce((a, b) => a + b, 0) / this.recentTotalVolumes.length;
+        const dynamicThreshold = Math.max(this.minVolumeFloor, avgTotalVolume * this.recentVolumeRatio);
+
+        // Add to rolling history
+        this.wallHistory.push({
+            time: Date.now(),
+            walls: rawWalls
+        });
+
+        // Limit history size
+        while (this.wallHistory.length > this.wallHistorySize) {
+            this.wallHistory.shift();
+        }
+
+        // Calculate smoothed walls (average volume per price across history)
+        const priceVolumes = new Map(); // price -> [volumes]
+        const priceTypes = new Map(); // price -> type
+
+        for (const snapshot of this.wallHistory) {
+            for (const wall of snapshot.walls) {
+                if (!priceVolumes.has(wall.price)) {
+                    priceVolumes.set(wall.price, []);
+                    priceTypes.set(wall.price, wall.type);
+                }
+                priceVolumes.get(wall.price).push(wall.volume);
+            }
+        }
+
+        // Build filtered walls (apply dynamic threshold + persistence)
+        let filteredWalls = [];
+        for (const [price, volumes] of priceVolumes.entries()) {
+            const persistenceRatio = volumes.length / this.wallHistorySize;
+            if (persistenceRatio < 0.6) continue;
+
+            const avgVolume = volumes.reduce((a, b) => a + b, 0) / volumes.length;
+
+            // Apply dynamic threshold
+            if (avgVolume < dynamicThreshold) continue;
+
+            filteredWalls.push({
+                price,
+                volume: avgVolume,
+                type: priceTypes.get(price),
+                persistence: persistenceRatio
+            });
+        }
+
+        // Cluster nearby prices into zones
+        filteredWalls.sort((a, b) => a.price - b.price);
+        const zones = this._clusterWallsIntoZones(filteredWalls);
+
+        // Sort by volume
+        zones.sort((a, b) => b.volume - a.volume);
+
+        this.smoothedWalls = zones;
+        return zones;
+    }
+
+    /**
+     * Cluster nearby walls into zones (price ranges)
+     */
+    _clusterWallsIntoZones(walls) {
+        if (walls.length === 0) return [];
+
+        const zones = [];
+        let currentZone = {
+            priceMin: walls[0].price,
+            priceMax: walls[0].price,
+            volume: walls[0].volume,
+            type: walls[0].type,
+            count: 1
+        };
+
+        for (let i = 1; i < walls.length; i++) {
+            const wall = walls[i];
+            const avgZonePrice = (currentZone.priceMin + currentZone.priceMax) / 2;
+            const distanceRatio = Math.abs(wall.price - avgZonePrice) / avgZonePrice;
+
+            if (distanceRatio <= this.zoneMergeThreshold && wall.type === currentZone.type) {
+                // Merge into current zone
+                currentZone.priceMax = Math.max(currentZone.priceMax, wall.price);
+                currentZone.priceMin = Math.min(currentZone.priceMin, wall.price);
+                currentZone.volume += wall.volume;
+                currentZone.count++;
+            } else {
+                // Finalize current zone, start new one
+                zones.push(this._finalizeZone(currentZone));
+                currentZone = {
+                    priceMin: wall.price,
+                    priceMax: wall.price,
+                    volume: wall.volume,
+                    type: wall.type,
+                    count: 1
+                };
+            }
+        }
+
+        // Don't forget last zone
+        zones.push(this._finalizeZone(currentZone));
+        return zones;
+    }
+
+    _finalizeZone(zone) {
+        return {
+            price: (zone.priceMin + zone.priceMax) / 2, // Center price
+            priceMin: zone.priceMin,
+            priceMax: zone.priceMax,
+            volume: zone.volume,
+            type: zone.type,
+            isZone: zone.priceMin !== zone.priceMax // True if clustered
+        };
+    }
+
+    /**
+     * Get crater data for visualization
+     * Returns historical max volume markers that slowly fade
+     */
+    getCraters(options = {}) {
+        const { aroundPrice = null, maxDistancePct = 1.0 } = options;
+        const price = Number(aroundPrice);
+        const hasAnchor = Number.isFinite(price) && price > 0;
+
+        const craterList = [];
+        for (const [craterPrice, crater] of this.craters.entries()) {
+            // Distance filter
+            if (hasAnchor) {
+                const distPct = (Math.abs(craterPrice - price) / price) * 100;
+                if (distPct > maxDistancePct) continue;
+            }
+
+            // Only show if still significant
+            if (crater.decayedVolume >= this.craterMinVolume) {
+                craterList.push({
+                    price: craterPrice,
+                    maxVolume: crater.maxVolume,
+                    currentVolume: crater.decayedVolume,
+                    intensity: crater.decayedVolume / crater.maxVolume, // 0-1 fade
+                    age: Date.now() - crater.lastSeen
+                });
+            }
+        }
+
+        // Sort by max volume (most significant first) and limit to top N
+        craterList.sort((a, b) => b.maxVolume - a.maxVolume);
+
+        return craterList.slice(0, this.maxCraters);
+    }
+
+    /**
      * Reset history
      */
     reset() {
@@ -257,6 +501,9 @@ export class DepthHeatmapStore {
         this.currentAsks.clear();
         this.lastSnapshotTime = 0;
         this.maxVolumeInHistory = 5000; // Start high to avoid flash
+        this.craters.clear();
+        this.wallHistory = [];
+        this.smoothedWalls = [];
     }
 }
 

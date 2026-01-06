@@ -8,10 +8,11 @@ export class VpsAPI {
         // Detect environment
         const isLocalHost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 
-        // If dev (localhost), point to VPS IP. If prod (on VPS), use relative path to avoid CORS/Network issues.
-        // If dev (localhost), point to VPS IP (Secure WSS). If prod (on VPS), use relative WSS default (443).
-        const defaultBase = isLocalHost ? 'https://100.86.66.124' : '';
-        const defaultWs = isLocalHost ? 'wss://100.86.66.124' : `wss://${window.location.hostname}`;
+        // Production: Use relative URL (same domain)
+        // Development: Point to lag0.io (HTTPS/WSS)
+        const domain = 'lag0.io';
+        const defaultBase = isLocalHost ? `https://${domain}` : '';
+        const defaultWs = isLocalHost ? `wss://${domain}` : `wss://${window.location.hostname}`;
 
         this.baseUrl = options.baseUrl || defaultBase;
         this.wsUrl = options.wsUrl || defaultWs;

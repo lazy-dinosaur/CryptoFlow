@@ -687,6 +687,29 @@ body {
   color: var(--sell-color);
 }
 
+.footer-links {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.7rem;
+  margin-left: auto;
+}
+
+.footer-links a {
+  color: var(--text-muted);
+  text-decoration: none;
+  transition: color var(--transition-fast);
+}
+
+.footer-links a:hover {
+  color: var(--accent-primary);
+}
+
+.footer-links span {
+  color: var(--text-muted);
+  opacity: 0.5;
+}
+
 /* ========================================
    Scrollbar Styling
    ======================================== */

@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CryptoFlow Analytics</title>
+    <style>
+        :root {
+            --bg: #0a0a0f;
+            --card: #12121a;
+            --border: #1e1e2e;
+            --text: #e0e0e0;
+            --accent: #4fc3f7;
+            --green: #4caf50;
+            --orange: #ff9800;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            font-size: 24px;
+            margin-bottom: 24px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        h1 span {
+            color: var(--accent);
+        }
+
+        .auth-form {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 32px;
+            max-width: 400px;
+            margin: 100px auto;
+        }
+
+        .auth-form input {
+            width: 100%;
+            padding: 12px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text);
+            margin-bottom: 16px;
+        }
+
+        .auth-form button {
+            width: 100%;
+            padding: 12px;
+            background: var(--accent);
+            border: none;
+            border-radius: 8px;
+            color: #000;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 20px;
+        }
+
+        .card-title {
+            font-size: 12px;
+            color: #888;
+            text-transform: uppercase;
+            margin-bottom: 8px;
+        }
+
+        .card-value {
+            font-size: 32px;
+            font-weight: 700;
+            color: var(--accent);
+        }
+
+        .card-sub {
+            font-size: 12px;
+            color: #666;
+            margin-top: 4px;
+        }
+
+        .table-card {
+            grid-column: span 2;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 12px;
+        }
+
+        th,
+        td {
+            text-align: left;
+            padding: 10px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        th {
+            font-size: 11px;
+            text-transform: uppercase;
+            color: #666;
+        }
+
+        .loading {
+            color: #666;
+            font-size: 14px;
+        }
+
+        #dashboard {
+            display: none;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <div id="auth" class="auth-form">
+            <h2 style="margin-bottom: 20px;">🔐 Analytics Login</h2>
+            <input type="password" id="key" placeholder="Enter analytics key...">
+            <button onclick="login()">Access Dashboard</button>
+            <p id="authError" style="color: #f44; margin-top: 12px; display: none;"></p>
+        </div>
+
+        <div id="dashboard">
+            <h1>📊 CryptoFlow <span>Analytics</span></h1>
+
+            <div class="grid">
+                <div class="card">
+                    <div class="card-title">Pageviews Today</div>
+                    <div class="card-value" id="viewsToday">-</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Pageviews This Week</div>
+                    <div class="card-value" id="viewsWeek">-</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Pageviews This Month</div>
+                    <div class="card-value" id="viewsMonth">-</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Unique Visitors Today</div>
+                    <div class="card-value" id="uniqueToday">-</div>
+                </div>
+            </div>
+
+            <div class="grid">
+                <div class="card table-card">
+                    <div class="card-title">Top Referrers (This Week)</div>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Source</th>
+                                <th>Visits</th>
+                            </tr>
+                        </thead>
+                        <tbody id="referrersTable"></tbody>
+                    </table>
+                </div>
+                <div class="card table-card">
+                    <div class="card-title">Top Clicked Elements (This Week)</div>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Element</th>
+                                <th>Clicks</th>
+                            </tr>
+                        </thead>
+                        <tbody id="clicksTable"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let apiKey = localStorage.getItem('cf_analytics_key') || '';
+
+        if (apiKey) {
+            loadDashboard();
+        }
+
+        function login() {
+            apiKey = document.getElementById('key').value;
+            localStorage.setItem('cf_analytics_key', apiKey);
+            loadDashboard();
+        }
+
+        async function loadDashboard() {
+            try {
+                const res = await fetch(`/api/analytics/stats?key=${encodeURIComponent(apiKey)}`);
+                if (!res.ok) {
+                    document.getElementById('authError').textContent = 'Invalid key';
+                    document.getElementById('authError').style.display = 'block';
+                    return;
+                }
+
+                const data = await res.json();
+
+                document.getElementById('auth').style.display = 'none';
+                document.getElementById('dashboard').style.display = 'block';
+
+                document.getElementById('viewsToday').textContent = data.pageviews.today.toLocaleString();
+                document.getElementById('viewsWeek').textContent = data.pageviews.week.toLocaleString();
+                document.getElementById('viewsMonth').textContent = data.pageviews.month.toLocaleString();
+                document.getElementById('uniqueToday').textContent = data.uniqueVisitors.today.toLocaleString();
+
+                const refTable = document.getElementById('referrersTable');
+                refTable.innerHTML = data.topReferrers.length ?
+                    data.topReferrers.map(r => `<tr><td>${escapeHtml(r.referrer || 'Direct')}</td><td>${r.count}</td></tr>`).join('') :
+                    '<tr><td colspan="2" style="color:#666">No data yet</td></tr>';
+
+                const clickTable = document.getElementById('clicksTable');
+                clickTable.innerHTML = data.topClicks.length ?
+                    data.topClicks.map(c => `<tr><td>${c.element_tag}${c.element_id ? '#' + c.element_id : ''}</td><td>${c.count}</td></tr>`).join('') :
+                    '<tr><td colspan="2" style="color:#666">No data yet</td></tr>';
+
+            } catch (err) {
+                console.error(err);
+            }
+        }
+
+        function escapeHtml(str) {
+            return str.replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": "&#39;" }[m]));
+        }
+    </script>
+</body>
+
+</html>

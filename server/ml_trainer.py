@@ -16,10 +16,10 @@ try:
     from sklearn.model_selection import train_test_split
     from sklearn.metrics import accuracy_score, classification_report
     import xgboost as xgb
-except ImportError:
-    print("Missing dependencies. Install with:")
-    print("pip install scikit-learn xgboost pandas numpy")
-    exit(1)
+except ImportError as e:
+    print(f"Warning: ML dependencies missing ({e}). Training disabled.")
+    # Do not exit, as other modules (OrderflowBot) might need helper functions
+    pass
 
 # Configuration
 DB_PATH = os.path.join(os.path.dirname(__file__), 'data', 'cryptoflow.db')

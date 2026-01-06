@@ -152,51 +152,92 @@ app.get('/api/depth', (req, res) => {
 // Deprecated/Removed for Security: /api/depth/batch
 // Client does not upload data anymore. Server is autonomous.
 
-// ==================== ML PROXY ====================
+// ==================== ML PROXY (DISABLED) ====================
 
 /**
  * Proxy requests to Python ML Service (Port 5001)
- * Frontend -> Node (443) -> Python (5001)
+ * DISABLED by request to prevent OpenRouter costs
  */
-app.all('/api/ml/*', async (req, res) => {
-    // SECURITY: Protect training endpoint
-    if (req.url.includes('/train')) {
-        const apiKey = req.headers['x-api-key'];
-        // Hardcoded key for "Public Alpha" simplicity. 
-        // In production, use process.env.ADMIN_KEY
-        if (apiKey !== 'CryptoFlowMasterKey2025!') {
-            return res.status(401).json({ error: 'Unauthorized: Admin Key Required for Training' });
-        }
-    }
+app.all(['/api/ml/*', '/api/ai/*'], async (req, res) => {
+    return res.status(403).json({
+        error: 'AI Service Disabled',
+        details: 'AI features are currently disabled for public use.'
+    });
+});
 
-    const targetUrl = `http://127.0.0.1:5001${req.url}`;
+// ==================== ANALYTICS ====================
 
+const crypto = require('crypto');
+
+/**
+ * Hash IP for privacy
+ */
+function hashIP(ip) {
+    if (!ip) return null;
+    return crypto.createHash('sha256').update(ip + 'cryptoflow-salt').digest('hex').substring(0, 16);
+}
+
+/**
+ * Record a pageview
+ */
+app.post('/api/analytics/pageview', (req, res) => {
     try {
-        const options = {
-            method: req.method,
-            headers: { 'Content-Type': 'application/json' },
-        };
-
-        if (req.method !== 'GET' && req.method !== 'HEAD') {
-            options.body = JSON.stringify(req.body);
-        }
-
-        const response = await fetch(targetUrl, options);
-
-        if (!response.ok) {
-            return res.status(response.status).json({ error: `ML Service Error: ${response.statusText}` });
-        }
-
-        const data = await response.json();
-        res.json(data);
-    } catch (err) {
-        console.error('ML Proxy Error:', err.message);
-        res.status(502).json({
-            error: 'ML Service Unavailable',
-            details: 'The AI Brain is starting up... please wait.'
+        const clientIP = req.headers['x-forwarded-for']?.split(',')[0] || req.ip;
+        db.insertPageview({
+            timestamp: Date.now(),
+            path: req.body.path || '/',
+            referrer: req.body.referrer || req.headers['referer'] || null,
+            userAgent: req.headers['user-agent'] || null,
+            ipHash: hashIP(clientIP),
+            sessionId: req.body.sessionId || null
         });
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
 });
+
+/**
+ * Record a click event
+ */
+app.post('/api/analytics/click', (req, res) => {
+    try {
+        db.insertClick({
+            timestamp: Date.now(),
+            path: req.body.path || '/',
+            elementId: req.body.elementId || null,
+            elementClass: req.body.elementClass || null,
+            elementTag: req.body.elementTag || null,
+            x: req.body.x || 0,
+            y: req.body.y || 0,
+            sessionId: req.body.sessionId || null
+        });
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * Get analytics stats (protected with simple key)
+ */
+app.get('/api/analytics/stats', (req, res) => {
+    const key = req.query.key || req.headers['x-analytics-key'];
+    if (key !== 'CryptoFlow2026!') {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
+    try {
+        const stats = db.getAnalyticsStats();
+        res.json(stats);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/*
+app.all(['/api/ml/*', '/api/ai/*'], async (req, res) => {
+    // ... existing code commented out ...
+*/
 
 // ==================== WEBSOCKET SERVER ====================
 
@@ -301,15 +342,24 @@ function broadcastCandle(symbol, candle) {
 // ==================== STARTUP ====================
 
 function start() {
-    // Start HTTPS/HTTP server
-    server.listen(PORT, () => {
-        const protocol = PORT === 443 ? 'https' : 'http';
-        console.log(`🌐 REST API running on ${protocol}://localhost:${PORT}`);
-        console.log(`📡 WebSocket running on wss://localhost:${PORT}`);
-    });
+    console.log(`🚀 Starting server with PORT=${PORT}`);
 
-    // Start data collector
-    startCollector();
+    // Start HTTPS/HTTP server
+    server.listen(PORT, '0.0.0.0', () => {
+        const protocol = PORT === 443 ? 'https' : 'http';
+        console.log(`🌐 REST API running on ${protocol}://0.0.0.0:${PORT}`);
+        console.log(`📡 WebSocket running on wss://0.0.0.0:${PORT}`);
+
+        // Start data collector after server is up (prevent blocking)
+        console.log('⏳ Scheduler: Starting Data Collector in 5s...');
+        setTimeout(() => {
+            try {
+                startCollector();
+            } catch (e) {
+                console.error('❌ Data Collector crashed:', e);
+            }
+        }, 5000);
+    });
 }
 
 // Start if run directly

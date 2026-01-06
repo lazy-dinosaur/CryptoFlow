@@ -96,6 +96,36 @@ function initSchema() {
         CREATE INDEX IF NOT EXISTS idx_heatmap_symbol_time ON heatmap_snapshots(symbol, time);
     `);
 
+    // Analytics: Page Views
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS analytics_pageviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp INTEGER NOT NULL,
+            path TEXT NOT NULL,
+            referrer TEXT,
+            user_agent TEXT,
+            ip_hash TEXT,
+            session_id TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_pageviews_timestamp ON analytics_pageviews(timestamp);
+    `);
+
+    // Analytics: Click Events
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS analytics_clicks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp INTEGER NOT NULL,
+            path TEXT NOT NULL,
+            element_id TEXT,
+            element_class TEXT,
+            element_tag TEXT,
+            x INTEGER,
+            y INTEGER,
+            session_id TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_clicks_timestamp ON analytics_clicks(timestamp);
+    `);
+
     console.log('✅ Database schema initialized');
 }
 
@@ -329,6 +359,103 @@ function getSnapshots(symbol, sinceTime = 0, limit = 1000, step = 1) {
     }));
 }
 
+// ==================== ANALYTICS ====================
+
+/**
+ * Insert a pageview
+ */
+const insertPageviewStmt = db.prepare(`
+    INSERT INTO analytics_pageviews (timestamp, path, referrer, user_agent, ip_hash, session_id)
+    VALUES (?, ?, ?, ?, ?, ?)
+`);
+
+function insertPageview(data) {
+    insertPageviewStmt.run(
+        data.timestamp || Date.now(),
+        data.path || '/',
+        data.referrer || null,
+        data.userAgent || null,
+        data.ipHash || null,
+        data.sessionId || null
+    );
+}
+
+/**
+ * Insert a click event
+ */
+const insertClickStmt = db.prepare(`
+    INSERT INTO analytics_clicks (timestamp, path, element_id, element_class, element_tag, x, y, session_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`);
+
+function insertClick(data) {
+    insertClickStmt.run(
+        data.timestamp || Date.now(),
+        data.path || '/',
+        data.elementId || null,
+        data.elementClass || null,
+        data.elementTag || null,
+        data.x || 0,
+        data.y || 0,
+        data.sessionId || null
+    );
+}
+
+/**
+ * Get analytics stats
+ */
+function getAnalyticsStats() {
+    const now = Date.now();
+    const dayAgo = now - 24 * 60 * 60 * 1000;
+    const weekAgo = now - 7 * 24 * 60 * 60 * 1000;
+    const monthAgo = now - 30 * 24 * 60 * 60 * 1000;
+
+    const viewsToday = db.prepare(`SELECT COUNT(*) as count FROM analytics_pageviews WHERE timestamp > ?`).get(dayAgo).count;
+    const viewsWeek = db.prepare(`SELECT COUNT(*) as count FROM analytics_pageviews WHERE timestamp > ?`).get(weekAgo).count;
+    const viewsMonth = db.prepare(`SELECT COUNT(*) as count FROM analytics_pageviews WHERE timestamp > ?`).get(monthAgo).count;
+
+    const uniqueToday = db.prepare(`SELECT COUNT(DISTINCT session_id) as count FROM analytics_pageviews WHERE timestamp > ?`).get(dayAgo).count;
+    const uniqueWeek = db.prepare(`SELECT COUNT(DISTINCT session_id) as count FROM analytics_pageviews WHERE timestamp > ?`).get(weekAgo).count;
+
+    const topPaths = db.prepare(`
+        SELECT path, COUNT(*) as count 
+        FROM analytics_pageviews 
+        WHERE timestamp > ?
+        GROUP BY path 
+        ORDER BY count DESC 
+        LIMIT 10
+    `).all(weekAgo);
+
+    const topReferrers = db.prepare(`
+        SELECT referrer, COUNT(*) as count 
+        FROM analytics_pageviews 
+        WHERE timestamp > ? AND referrer IS NOT NULL AND referrer != ''
+        GROUP BY referrer 
+        ORDER BY count DESC 
+        LIMIT 10
+    `).all(weekAgo);
+
+    const clicksToday = db.prepare(`SELECT COUNT(*) as count FROM analytics_clicks WHERE timestamp > ?`).get(dayAgo).count;
+
+    const topClicks = db.prepare(`
+        SELECT element_id, element_tag, COUNT(*) as count 
+        FROM analytics_clicks 
+        WHERE timestamp > ?
+        GROUP BY element_id, element_tag 
+        ORDER BY count DESC 
+        LIMIT 20
+    `).all(weekAgo);
+
+    return {
+        pageviews: { today: viewsToday, week: viewsWeek, month: viewsMonth },
+        uniqueVisitors: { today: uniqueToday, week: uniqueWeek },
+        clicks: { today: clicksToday },
+        topPaths,
+        topReferrers,
+        topClicks
+    };
+}
+
 
 module.exports = {
     db,
@@ -343,5 +470,9 @@ module.exports = {
     cleanupOldData,
     getStats,
     insertSnapshots,
-    getSnapshots
+    getSnapshots,
+    // Analytics
+    insertPageview,
+    insertClick,
+    getAnalyticsStats
 };

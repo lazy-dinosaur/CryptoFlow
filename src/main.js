@@ -15,6 +15,10 @@ import { FootprintChart } from './components/FootprintChart.js';
 import { VolumeProfile } from './components/VolumeProfile.js';
 import { OrderBook } from './components/OrderBook.js';
 import { MLDashboard } from './components/MLDashboard.js';
+import { drawingManager } from './services/drawingManager.js';
+import { DrawingToolbar } from './components/DrawingToolbar.js';
+import { replayManager } from './services/replayManager.js';
+import { ReplayControls } from './components/ReplayControls.js';
 
 
 class CryptoFlowApp {
@@ -111,6 +115,7 @@ class CryptoFlowApp {
             width: window.innerWidth - 320, // Subtract sidebar width
             height: window.innerHeight
         });
+        this.footprintChart.parentApp = this; // Link for context access
 
         this.depthHeatmap = depthHeatmap;
 
@@ -172,6 +177,7 @@ class CryptoFlowApp {
 
         // ML Dashboard
         this.mlDashboard = new MLDashboard('mlDashboard');
+        this.mlDashboard.setChart(this.footprintChart);
 
         // FORCE TRUE for debugging (Verify if localstorage is the culprit)
         const isMLVisible = true;
@@ -208,8 +214,27 @@ class CryptoFlowApp {
             }
         });
 
+        // Drawing Tools
+        this.drawingToolbar = new DrawingToolbar(drawingManager);
+        this.footprintChart.setDrawingManager(drawingManager);
 
+        // Replay Mode
+        this.replayControls = new ReplayControls(replayManager, dataAggregator);
+        this.replayControls.setOnCandleUpdate((candles) => {
+            this.footprintChart.updateCandles(candles);
+            this._updateSessionStats(candles);
+        });
 
+        // Listen for live data pause during replay
+        window.addEventListener('replay:active', (e) => {
+            this.isReplayActive = e.detail;
+        });
+
+        replayManager.on('stop', () => {
+            this.isReplayActive = false;
+            // Resume live data
+            this._refreshChart();
+        });
     }
 
     /**
@@ -239,6 +264,13 @@ class CryptoFlowApp {
                 this.elements.timeframeBtns.forEach(b => b.classList.remove('active'));
                 btn.classList.add('active');
             });
+        });
+
+        // Start replay event
+        window.addEventListener('start-replay', () => {
+            if (!replayManager.isActive) {
+                this.replayControls.startReplay();
+            }
         });
 
         // --- NEW CHECKBOX HANDLERS ---
@@ -519,13 +551,20 @@ class CryptoFlowApp {
                 console.log('[Heatmap] Updating chart with', heatmapData.snapshots?.length || 0, 'snapshots');
                 this.footprintChart.updateDepthHeatmap(heatmapData);
 
-                // L-toggle overlay: show strongest current book walls near price
-                const walls = this.depthHeatmap.getTopWalls({
+                // L-toggle overlay: show SMOOTHED walls (less jumping) near price
+                const walls = this.depthHeatmap.getSmoothedWalls({
                     aroundPrice: this.currentPrice,
                     countPerSide: 3,
                     maxDistancePct: 0.6,
                 });
                 this.footprintChart.setLiquidityLevels(walls);
+
+                // Get crater data (historical max volume markers)
+                const craters = this.depthHeatmap.getCraters({
+                    aroundPrice: this.currentPrice,
+                    maxDistancePct: 1.0
+                });
+                this.footprintChart.setCraters(craters);
 
                 this._lastHeatmapUpdate = now;
             }

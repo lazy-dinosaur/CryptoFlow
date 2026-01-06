@@ -68,7 +68,7 @@ export class FootprintChart {
 
         // Thresholds
         // Heatmap defaults (Bookmap style)
-        this.heatmapIntensityThreshold = 0.005; // Very low to handle extreme historical maxVol
+        this.heatmapIntensityThreshold = 0.02; // Default 2% to filter noise
         this.heatmapOpacity = 0.8;
         this.maxVolumeInHistory = 5000; // Start high to avoid "Flash of Red" on load
         this.showBigTrades = true;
@@ -90,6 +90,13 @@ export class FootprintChart {
 
         this.mlPrediction = null; // { prediction: 'win', confidence: 0.85 }
         this.mlHistory = new Map(); // timestamp -> signal
+
+        // Drawing System
+        this.drawingManager = null;
+        this.currentSymbol = 'btcusdt';
+
+        // Crater System (historical max volume markers)
+        this.craters = [];
 
         // PRO COLORS
         this.colors = {
@@ -153,11 +160,12 @@ export class FootprintChart {
         // PRE-CALCULATE SESSION PROFILE
         this._calculateSessionProfile();
 
-        // Auto-Center ONLY if dataset changed significantly (e.g. Symbol/TF switch)
-        // Heuristic: If First Candle Time changed, or if we went from 0 to N candles
-        const oldStart = oldCandles.length > 0 ? oldCandles[0].time : 0;
-        const newStart = this.candles.length > 0 ? this.candles[0].time : 0;
-        const isNewDataset = (oldCandles.length === 0 && this.candles.length > 0) || (oldStart !== newStart);
+        // Auto-Center ONLY on actual dataset change (Symbol/TF switch)
+        // NOT when candles naturally roll forward (which changes first candle time)
+        // Heuristic: Only reset if we went from 0 to N candles (fresh load)
+        // OR if the total number of candles doubled (massive reload)
+        const isNewDataset = (oldCandles.length === 0 && this.candles.length > 0) ||
+            (this.candles.length > oldCandles.length * 2);
 
         if (isNewDataset) {
             // Update current price from last candle if not set
@@ -245,9 +253,32 @@ export class FootprintChart {
         this.requestDraw();
     }
 
+    setAISignal(signal) {
+        this.aiSignal = signal;
+        console.log("AI Signal Set:", signal);
+        this.requestDraw();
+    }
+
     setLiquidityLevels(levels) {
         this.nakedLiquidityLevels = levels || [];
         this.requestDraw();
+    }
+
+    setCraters(craters) {
+        this.craters = craters || [];
+        this.requestDraw();
+    }
+
+    setDrawingManager(manager) {
+        this.drawingManager = manager;
+
+        // Listen for drawing changes
+        manager.on('drawingsChange', () => this.requestDraw());
+        manager.on('pendingChange', () => this.requestDraw());
+    }
+
+    setCurrentSymbol(symbol) {
+        this.currentSymbol = symbol;
     }
 
     resetView() {
@@ -417,6 +448,10 @@ export class FootprintChart {
     _getX(index) { return Math.floor((index * this.zoomX) + this.offsetX) + 0.5; }
     _getY(price) { return Math.floor(this.height - ((price / this.tickSize * this.zoomY) + this.offsetY) - this._deltaH()) + 0.5; }
     _getPriceFromY(y) { return (this.height - y - this.offsetY - this._deltaH()) / this.zoomY * this.tickSize; }
+    _getCandleAtX(x) {
+        const index = Math.floor((x - this.offsetX) / this.zoomX);
+        return (index >= 0 && index < this.candles.length) ? this.candles[index] : null;
+    }
 
     // RENDER
     requestDraw() {
@@ -453,6 +488,7 @@ export class FootprintChart {
             if (this.showSessionProfile) this._drawSessionProfile(ctx);
 
             this._drawCandles(ctx);
+            this._drawSessionHighlights(ctx); // London/NY open markers
 
             // Draw Bottom Panels
             if (this.showDelta) this._drawDeltaSummary(ctx);
@@ -461,14 +497,25 @@ export class FootprintChart {
             this._drawPriceLine(ctx);
             if (this.showBigTrades) this._drawBigTrades(ctx);
             if (this.showCrosshair && this.crosshairX) this._drawCrosshair(ctx);
+
+            // Draw AI Signal
+            if (this.aiSignal) this._drawAISignal(ctx);
+
             if (this.showLens) this._drawLens(ctx);
 
             // Wall Attack (Always On or toggle? User asked for it, lets keep it always on or tied to ML)
             // Let's tie it to 'showML' flag for now, or just always show if heavy wall nearby.
             if (this.showML) {
+                this._drawLiquidityZones(ctx); // Draw zones as rectangles
+                this._drawCraters(ctx); // Crater markers (historical max volume)
                 this._drawWallAttack(ctx); // Existing HUD
-                this._drawHistoricalSignals(ctx); // NEW: Historical markers
+                // this._drawHistoricalSignals(ctx); // Disabled: Bot signal labels
                 this._drawTradePlan(ctx);  // NEW Trade Lines
+            }
+
+            // User Drawings (always on top)
+            if (this.drawingManager) {
+                this._drawDrawings(ctx);
             }
 
         } catch (e) {
@@ -478,6 +525,54 @@ export class FootprintChart {
             ctx.font = '14px sans-serif';
             ctx.fillText('Render Error: ' + e.message, 10, 20);
         }
+    }
+
+    /**
+     * Draw session highlights - vertical lines at London Open (09:00 UTC) and NY Open (14:00 UTC)
+     */
+    _drawSessionHighlights(ctx) {
+        if (!this.candles || this.candles.length === 0) return;
+
+        const { height } = this;
+        const deltaH = this._deltaH();
+        const chartHeight = height - deltaH;
+
+        ctx.save();
+        ctx.setLineDash([5, 3]);
+        ctx.lineWidth = 1;
+        ctx.font = 'bold 10px sans-serif';
+
+        const sessions = [
+            { hour: 9, label: 'LDN', color: 'rgba(66, 165, 245, 0.6)' },   // London Open
+            { hour: 14, label: 'NY', color: 'rgba(255, 167, 38, 0.6)' }    // NY Open
+        ];
+
+        for (let i = 0; i < this.candles.length; i++) {
+            const candle = this.candles[i];
+            const date = new Date(candle.time);
+            const hourUTC = date.getUTCHours();
+            const minuteUTC = date.getUTCMinutes();
+
+            for (const session of sessions) {
+                // Only mark the first candle of the hour
+                if (hourUTC === session.hour && minuteUTC < 5) {
+                    const x = this._getX(i) + this.zoomX / 2;
+
+                    ctx.strokeStyle = session.color;
+                    ctx.beginPath();
+                    ctx.moveTo(x, 0);
+                    ctx.lineTo(x, chartHeight);
+                    ctx.stroke();
+
+                    // Draw label at top
+                    ctx.fillStyle = session.color;
+                    ctx.fillText(session.label, x + 4, 12);
+                }
+            }
+        }
+
+        ctx.setLineDash([]);
+        ctx.restore();
     }
 
     _drawSessionProfile(ctx) {
@@ -1283,6 +1378,96 @@ export class FootprintChart {
      * - Momentum Factor (recent trades weighted more)
      * - Modern Glassmorphism UI
      */
+
+    /**
+     * Draw crater markers - fading indicators where volume WAS high historically
+     */
+    _drawCraters(ctx) {
+        if (!this.craters || this.craters.length === 0) return;
+
+        const { width } = this;
+        ctx.save();
+
+        for (const crater of this.craters) {
+            const y = this._getY(crater.price);
+
+            // Skip if off-screen
+            if (y < 0 || y > this.height) continue;
+
+            // Color based on intensity (fades over time)
+            const intensity = crater.intensity || 0.5;
+            const alpha = Math.max(0.1, intensity * 0.4);
+
+            // Purple/magenta color for craters (distinct from walls)
+            ctx.strokeStyle = `rgba(156, 39, 176, ${alpha})`;
+            ctx.fillStyle = `rgba(156, 39, 176, ${alpha * 0.3})`;
+            ctx.lineWidth = 1;
+            ctx.setLineDash([3, 3]);
+
+            // Draw dashed line across chart
+            ctx.beginPath();
+            ctx.moveTo(0, y);
+            ctx.lineTo(width - 120, y);
+            ctx.stroke();
+
+            // Draw crater label on the right
+            if (intensity > 0.3) {
+                const labelX = width - 115;
+                ctx.setLineDash([]);
+                ctx.font = 'bold 9px monospace';
+                ctx.fillStyle = `rgba(156, 39, 176, ${Math.max(0.5, intensity)})`;
+                ctx.fillText(`⬤ ${crater.maxVolume.toFixed(1)}`, labelX, y + 3);
+            }
+        }
+
+        ctx.setLineDash([]);
+        ctx.restore();
+    }
+
+    /**
+     * Draw liquidity zones as colored rectangles
+     * Green = Support (bid walls), Red = Resistance (ask walls)
+     */
+    _drawLiquidityZones(ctx) {
+        if (!this.nakedLiquidityLevels || this.nakedLiquidityLevels.length === 0) return;
+
+        const { width } = this;
+        ctx.save();
+
+        for (const zone of this.nakedLiquidityLevels) {
+            // Get Y coordinates
+            const yMin = zone.priceMin ? this._getY(zone.priceMax) : this._getY(zone.price * 1.0005);
+            const yMax = zone.priceMin ? this._getY(zone.priceMin) : this._getY(zone.price * 0.9995);
+            const height = Math.max(yMax - yMin, 4); // Minimum 4px height
+
+            // Skip if off-screen
+            if (yMax < 0 || yMin > this.height) continue;
+
+            // Color based on type: bid = green (support), ask = red (resistance)
+            const isBid = zone.type === 'bid';
+            const baseColor = isBid ? '0, 200, 83' : '244, 67, 54';
+
+            // Draw filled rectangle with transparency
+            ctx.fillStyle = `rgba(${baseColor}, 0.15)`;
+            ctx.fillRect(0, yMin, width - 120, height);
+
+            // Draw border
+            ctx.strokeStyle = `rgba(${baseColor}, 0.6)`;
+            ctx.lineWidth = 1;
+            ctx.strokeRect(0, yMin, width - 120, height);
+
+            // Draw volume label
+            ctx.fillStyle = `rgba(${baseColor}, 0.9)`;
+            ctx.font = 'bold 10px monospace';
+            const label = `${zone.volume.toFixed(1)} BTC`;
+            const labelX = width - 115;
+            const labelY = yMin + height / 2 + 3;
+            ctx.fillText(label, labelX, labelY);
+        }
+
+        ctx.restore();
+    }
+
     _drawWallAttack(ctx) {
         if (!this.heatmapData || !this.currentPrice || !this.candles.length) return;
 
@@ -2117,6 +2302,36 @@ export class FootprintChart {
         const y = e.clientY - rect.top;
         const { width, height } = this;
 
+        // DRAWING MODE: Handle drawing tool clicks
+        if (this.drawingManager && this.drawingManager.getActiveTool() !== 'select') {
+            const tool = this.drawingManager.getActiveTool();
+            const price = this._getPriceFromY(y);
+            const candle = this._getCandleAtX(x);
+            const time = candle ? candle.time : Date.now();
+
+            if (tool === 'horizontal') {
+                // Single click creates horizontal line
+                this.drawingManager.addDrawing({
+                    type: 'horizontal',
+                    points: [{ price, time }],
+                    color: '#ffd700',
+                    symbol: this.currentSymbol
+                });
+                this.drawingManager.setActiveTool('select');
+                return;
+            } else if (['trendline', 'rectangle', 'fibonacci'].includes(tool)) {
+                // Two-click drawings
+                if (!this.drawingManager.pendingDrawing) {
+                    this.drawingManager.startPendingDrawing(tool, { price, time });
+                } else {
+                    this.drawingManager.updatePendingDrawing({ price, time });
+                    this.drawingManager.finalizePendingDrawing(this.currentSymbol);
+                    this.drawingManager.setActiveTool('select');
+                }
+                return;
+            }
+        }
+
         // Check if clicking on a wall marker
         if (this._wallZones && this._wallZones.length > 0) {
             for (const zone of this._wallZones) {
@@ -2176,6 +2391,14 @@ export class FootprintChart {
             this.canvas.style.cursor = 'col-resize';
         } else {
             this.canvas.style.cursor = this.isDragging ? 'grabbing' : 'crosshair';
+        }
+
+        // Update pending drawing preview
+        if (this.drawingManager && this.drawingManager.pendingDrawing) {
+            const price = this._getPriceFromY(y);
+            const candle = this._getCandleAtX(x);
+            const time = candle ? candle.time : Date.now();
+            this.drawingManager.updatePendingDrawing({ price, time });
         }
 
         if (this.isDraggingPrice) {
@@ -2258,10 +2481,19 @@ export class FootprintChart {
     _initResizeObserver() {
         new ResizeObserver(entries => {
             const rect = entries[0].contentRect;
+            const prevHeight = this.height;
             this.width = rect.width;
             this.height = rect.height;
             this.canvas.width = this.width;
             this.canvas.height = this.height;
+
+            // Auto-center vertically when height first becomes available
+            // or when height changes significantly (e.g., from 0 to actual size)
+            if (prevHeight === 0 && this.height > 0 && this.currentPrice) {
+                this.offsetY = (this.height / 2) - (this.currentPrice / this.tickSize * this.zoomY);
+                this.initialCenterDone = true;
+            }
+
             this.requestDraw();
         }).observe(this.container);
     }
@@ -2293,26 +2525,50 @@ export class FootprintChart {
             // Arrow below Low
             const y = this._getY(candle.low) + 20;
 
-            // Determine Color based on Win/Loss (if we knew outcome) or just Signal type
-            ctx.fillStyle = '#00e676'; // Bright Green
+            // Determine Style based on Source
+            const isBot = signal.source === 'OrderflowBot';
+            const color = isBot ? '#ffd700' : '#00e676'; // Gold for Bot, Green for ML
 
-            // Draw Arrow Up
-            ctx.beginPath();
-            ctx.moveTo(x, y);
-            ctx.lineTo(x - 5, y + 8);
-            ctx.lineTo(x + 5, y + 8);
-            ctx.fill();
+            ctx.fillStyle = color;
+            ctx.strokeStyle = color;
 
-            // Text Label
-            ctx.fillStyle = '#00e676';
-            ctx.fillText('ENTRY', x, y + 20);
+            if (isBot) {
+                // Draw SHIELD (🛡️) shape
+                const shieldY = y + 5;
+                ctx.beginPath();
+                ctx.moveTo(x - 6, shieldY);
+                ctx.lineTo(x + 6, shieldY);
+                ctx.lineTo(x + 6, shieldY + 6);
+                ctx.bezierCurveTo(x + 6, shieldY + 12, x, shieldY + 16, x, shieldY + 16);
+                ctx.bezierCurveTo(x, shieldY + 16, x - 6, shieldY + 12, x - 6, shieldY + 6);
+                ctx.closePath();
+                ctx.fill();
 
-            // Draw REJECTION text if it was a rejection setup
-            if (signal.setupType === 'Support Bounce') {
-                const rejectionY = this._getY(candle.low) + 32;
+                // Label
+                ctx.font = 'bold 10px sans-serif';
+                ctx.fillText('BOT', x, y + 25);
+            } else {
+                // Draw ARROW (ML)
+                ctx.beginPath();
+                ctx.moveTo(x, y);
+                ctx.lineTo(x - 5, y + 8);
+                ctx.lineTo(x + 5, y + 8);
+                ctx.fill();
+
+                // Label
+                ctx.font = 'bold 10px sans-serif';
+                ctx.fillText('ML', x, y + 22);
+            }
+
+            // Draw Setup Type (e.g. "Absorption")
+            if (signal.setupType) {
+                const labelY = y + 35;
                 ctx.fillStyle = '#ffffff';
-                ctx.font = 'bold 9px monospace';
-                ctx.fillText('REJECTION', x, rejectionY);
+                ctx.font = '9px monospace';
+                // Truncate if too long
+                let typeText = signal.setupType.replace('Absorption', 'Abs.');
+                if (typeText.length > 15) typeText = typeText.substring(0, 15) + '..';
+                ctx.fillText(typeText, x, labelY);
             }
 
             // Draw Hover Details
@@ -2464,4 +2720,241 @@ export class FootprintChart {
 
         ctx.restore();
     }
+
+    _drawAISignal(ctx) {
+        if (!this.aiSignal) return;
+        const { entry, sl, tp, type } = this.aiSignal;
+        const width = this.width;
+
+        ctx.save();
+        ctx.font = 'bold 12px sans-serif';
+        ctx.setLineDash([5, 3]);
+
+        // ENTRY
+        const yEntry = this._getY(entry);
+        ctx.strokeStyle = '#ba68c8'; // AI Purple Light
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(0, yEntry);
+        ctx.lineTo(width, yEntry);
+        ctx.stroke();
+
+        ctx.fillStyle = '#ba68c8';
+        ctx.textAlign = 'right';
+        ctx.fillText(`✨ AI+ENTRY ${type || 'TRADE'} @ ${entry}`, width - 80, yEntry - 8);
+
+        ctx.lineWidth = 1;
+
+        // SL
+        if (sl) {
+            const ySL = this._getY(sl);
+            ctx.strokeStyle = '#ef5350';
+            ctx.fillStyle = '#ef5350';
+            ctx.beginPath();
+            ctx.moveTo(0, ySL);
+            ctx.lineTo(width, ySL);
+            ctx.stroke();
+            ctx.fillText(`SL @ ${sl}`, width - 80, ySL - 4);
+        }
+
+        // TP
+        if (tp) {
+            const yTP = this._getY(tp);
+            ctx.strokeStyle = '#66bb6a';
+            ctx.fillStyle = '#66bb6a';
+            ctx.beginPath();
+            ctx.moveTo(0, yTP);
+            ctx.lineTo(width, yTP);
+            ctx.stroke();
+            ctx.fillText(`TP @ ${tp}`, width - 80, yTP - 4);
+        }
+
+        ctx.restore();
+    }
+
+    _drawDrawings(ctx) {
+        if (!this.drawingManager) return;
+
+        const { width, height } = this;
+        const drawings = this.drawingManager.getDrawings(this.currentSymbol);
+        const pending = this.drawingManager.pendingDrawing;
+        const selected = this.drawingManager.selectedDrawing;
+
+        ctx.save();
+        ctx.lineWidth = 1.5;
+
+        // Draw saved drawings
+        for (const d of drawings) {
+            this._renderDrawing(ctx, d, d.id === selected?.id);
+        }
+
+        // Draw pending (in-progress) drawing
+        if (pending) {
+            this._renderDrawing(ctx, pending, false, true);
+        }
+
+        ctx.restore();
+    }
+
+    _renderDrawing(ctx, drawing, isSelected, isPending = false) {
+        const color = isPending ? '#ffffff' : (drawing.color || '#ffd700');
+        ctx.strokeStyle = color;
+        ctx.fillStyle = color;
+
+        if (isSelected) {
+            ctx.lineWidth = 2.5;
+            ctx.setLineDash([]);
+        } else if (isPending) {
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash([5, 5]);
+        } else {
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash([]);
+        }
+
+        switch (drawing.type) {
+            case 'horizontal':
+                this._drawHorizontalLine(ctx, drawing, isSelected);
+                break;
+            case 'trendline':
+                this._drawTrendline(ctx, drawing, isSelected);
+                break;
+            case 'rectangle':
+                this._drawRectangle(ctx, drawing, isSelected);
+                break;
+            case 'fibonacci':
+                this._drawFibonacci(ctx, drawing, isSelected);
+                break;
+        }
+
+        ctx.setLineDash([]);
+    }
+
+    _drawHorizontalLine(ctx, drawing, isSelected) {
+        const { width } = this;
+        const price = drawing.points[0]?.price;
+        if (!price) return;
+
+        const y = this._getY(price);
+
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(width, y);
+        ctx.stroke();
+
+        // Price label
+        ctx.font = 'bold 11px monospace';
+        ctx.fillText(price.toFixed(2), width - 80, y - 4);
+
+        // Selection handles
+        if (isSelected) {
+            ctx.fillStyle = ctx.strokeStyle;
+            ctx.beginPath();
+            ctx.arc(50, y, 5, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    _drawTrendline(ctx, drawing, isSelected) {
+        if (drawing.points.length < 2) return;
+
+        const p1 = drawing.points[0];
+        const p2 = drawing.points[1];
+
+        // Find candle index for time
+        const x1 = this._getXForTime(p1.time);
+        const y1 = this._getY(p1.price);
+        const x2 = this._getXForTime(p2.time);
+        const y2 = this._getY(p2.price);
+
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+
+        if (isSelected) {
+            ctx.fillStyle = ctx.strokeStyle;
+            ctx.beginPath();
+            ctx.arc(x1, y1, 5, 0, Math.PI * 2);
+            ctx.arc(x2, y2, 5, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    _drawRectangle(ctx, drawing, isSelected) {
+        if (drawing.points.length < 2) return;
+
+        const p1 = drawing.points[0];
+        const p2 = drawing.points[1];
+
+        const x1 = this._getXForTime(p1.time);
+        const y1 = this._getY(p1.price);
+        const x2 = this._getXForTime(p2.time);
+        const y2 = this._getY(p2.price);
+
+        const minX = Math.min(x1, x2);
+        const minY = Math.min(y1, y2);
+        const w = Math.abs(x2 - x1);
+        const h = Math.abs(y2 - y1);
+
+        // Fill
+        ctx.globalAlpha = 0.15;
+        ctx.fillRect(minX, minY, w, h);
+        ctx.globalAlpha = 1.0;
+
+        // Stroke
+        ctx.strokeRect(minX, minY, w, h);
+
+        if (isSelected) {
+            ctx.fillStyle = ctx.strokeStyle;
+            ctx.fillRect(x1 - 4, y1 - 4, 8, 8);
+            ctx.fillRect(x2 - 4, y2 - 4, 8, 8);
+        }
+    }
+
+    _drawFibonacci(ctx, drawing, isSelected) {
+        if (drawing.points.length < 2) return;
+
+        const p1 = drawing.points[0];
+        const p2 = drawing.points[1];
+        const { width } = this;
+
+        const y1 = this._getY(p1.price);
+        const y2 = this._getY(p2.price);
+        const priceRange = p2.price - p1.price;
+
+        const levels = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
+        ctx.font = '10px monospace';
+
+        for (const level of levels) {
+            const price = p1.price + (priceRange * level);
+            const y = this._getY(price);
+
+            ctx.globalAlpha = level === 0 || level === 1 ? 1 : 0.6;
+            ctx.beginPath();
+            ctx.moveTo(0, y);
+            ctx.lineTo(width, y);
+            ctx.stroke();
+
+            ctx.fillText(`${(level * 100).toFixed(1)}% - ${price.toFixed(2)}`, 10, y - 4);
+        }
+        ctx.globalAlpha = 1;
+    }
+
+    _getXForTime(time) {
+        // Find candle with this time
+        const idx = this.candles.findIndex(c => c.time === time);
+        if (idx >= 0) {
+            return this._getX(idx) + this.zoomX / 2;
+        }
+        // Fallback: estimate based on first candle
+        if (this.candles.length > 0) {
+            const firstTime = this.candles[0].time;
+            const candleWidth = 60000; // 1 min candles
+            const estimatedIdx = (time - firstTime) / candleWidth;
+            return this._getX(estimatedIdx) + this.zoomX / 2;
+        }
+        return 0;
+    }
 }
+
