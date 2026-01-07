@@ -462,7 +462,9 @@ class CryptoFlowApp {
             // Save settings
             settingsManager.setTickSize(this.currentSymbol, tickSize);
 
-            dataAggregator.reset();
+            // Rebuild candles with new tick size from cached trades
+            dataAggregator.rebuildCandles();
+            this._updateCharts();
         });
 
         // Help overlay

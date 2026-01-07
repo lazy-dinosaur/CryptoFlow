@@ -446,7 +446,12 @@ function getAnalyticsStats() {
         LIMIT 20
     `).all(weekAgo);
 
+    // Active users in last 5 minutes (Live)
+    const fiveMinsAgo = now - 5 * 60 * 1000;
+    const liveVisitors = db.prepare(`SELECT COUNT(DISTINCT session_id) as count FROM analytics_pageviews WHERE timestamp > ?`).get(fiveMinsAgo).count;
+
     return {
+        liveVisitors, // New metric
         pageviews: { today: viewsToday, week: viewsWeek, month: viewsMonth },
         uniqueVisitors: { today: uniqueToday, week: uniqueWeek },
         clicks: { today: clicksToday },

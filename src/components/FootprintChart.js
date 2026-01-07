@@ -68,7 +68,7 @@ export class FootprintChart {
 
         // Thresholds
         // Heatmap defaults (Bookmap style)
-        this.heatmapIntensityThreshold = 0.02; // Default 2% to filter noise
+        this.heatmapIntensityThreshold = 0.005; // Default 0.5% to show more (was 2%)
         this.heatmapOpacity = 0.8;
         this.maxVolumeInHistory = 5000; // Start high to avoid "Flash of Red" on load
         this.showBigTrades = true;

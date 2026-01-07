@@ -157,6 +157,11 @@
             <h1>📊 CryptoFlow <span>Analytics</span></h1>
 
             <div class="grid">
+                <div class="card" style="border-color: var(--green);">
+                    <div class="card-title" style="color: var(--green);">Live Now 🟢</div>
+                    <div class="card-value" id="liveVisitors" style="color: var(--green);">-</div>
+                    <div class="card-sub">Active in last 5m</div>
+                </div>
                 <div class="card">
                     <div class="card-title">Pageviews Today</div>
                     <div class="card-value" id="viewsToday">-</div>
@@ -231,6 +236,7 @@
                 document.getElementById('auth').style.display = 'none';
                 document.getElementById('dashboard').style.display = 'block';
 
+                document.getElementById('liveVisitors').textContent = data.liveVisitors || 0;
                 document.getElementById('viewsToday').textContent = data.pageviews.today.toLocaleString();
                 document.getElementById('viewsWeek').textContent = data.pageviews.week.toLocaleString();
                 document.getElementById('viewsMonth').textContent = data.pageviews.month.toLocaleString();
@@ -250,6 +256,13 @@
                 console.error(err);
             }
         }
+
+        // Auto refresh every 30s
+        setInterval(() => {
+            if (apiKey && document.getElementById('dashboard').style.display === 'block') {
+                loadDashboard();
+            }
+        }, 30000);
 
         function escapeHtml(str) {
             return str.replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": "&#39;" }[m]));

@@ -18,7 +18,7 @@ const DEFAULT_SETTINGS = {
     showBigTrades: true,
 
     // UI sliders
-    heatmapIntensityThreshold: 0.02,
+    heatmapIntensityThreshold: 0.005, // 0.5% - lower to show more (was 0.02)
     heatmapHistoryPercent: 60,
 
     tickSizes: {
