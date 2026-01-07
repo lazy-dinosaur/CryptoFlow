@@ -446,9 +446,9 @@ function getAnalyticsStats() {
         LIMIT 20
     `).all(weekAgo);
 
-    // Active users in last 5 minutes (Live)
+    // Active users in last 5 minutes (Live) - use ip_hash for reliability
     const fiveMinsAgo = now - 5 * 60 * 1000;
-    const liveVisitors = db.prepare(`SELECT COUNT(DISTINCT session_id) as count FROM analytics_pageviews WHERE timestamp > ?`).get(fiveMinsAgo).count;
+    const liveVisitors = db.prepare(`SELECT COUNT(DISTINCT ip_hash) as count FROM analytics_pageviews WHERE timestamp > ? AND ip_hash IS NOT NULL`).get(fiveMinsAgo).count;
 
     return {
         liveVisitors, // New metric

@@ -257,12 +257,25 @@
             }
         }
 
-        // Auto refresh every 30s
+        // Track logged-in state
+        let isLoggedIn = false;
+
+        // Auto refresh every 10s when logged in
         setInterval(() => {
-            if (apiKey && document.getElementById('dashboard').style.display === 'block') {
+            if (isLoggedIn) {
                 loadDashboard();
+                console.log('[Analytics] Auto-refreshed at', new Date().toLocaleTimeString());
             }
-        }, 30000);
+        }, 10000);
+
+        // Wrap loadDashboard to track state
+        const originalLoadDashboard = loadDashboard;
+        loadDashboard = async function () {
+            await originalLoadDashboard();
+            if (document.getElementById('dashboard').style.display === 'block') {
+                isLoggedIn = true;
+            }
+        };
 
         function escapeHtml(str) {
             return str.replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": "&#39;" }[m]));
