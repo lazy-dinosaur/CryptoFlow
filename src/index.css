@@ -154,6 +154,7 @@ body {
   background-clip: text;
 }
 
+.exchange-selector select,
 .symbol-selector select {
   background: var(--bg-tertiary);
   border: 1px solid var(--border-light);
@@ -171,10 +172,17 @@ body {
   transition: var(--transition-fast);
 }
 
+.exchange-selector select {
+  background-color: var(--bg-secondary);
+  border-color: var(--accent-primary);
+}
+
+.exchange-selector select:hover,
 .symbol-selector select:hover {
   border-color: var(--accent-primary);
 }
 
+.exchange-selector select:focus,
 .symbol-selector select:focus {
   outline: none;
   border-color: var(--accent-primary);

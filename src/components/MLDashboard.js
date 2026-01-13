@@ -6,7 +6,11 @@
 export class MLDashboard {
     constructor(containerId) {
         this.container = document.getElementById(containerId);
-        this.apiUrl = '/api/ml';
+
+        // Detect environment - use VPS URL when running locally
+        const isLocalHost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+        const baseUrl = isLocalHost ? 'http://134.185.107.33:3000' : '';
+        this.apiUrl = `${baseUrl}/api/ml`;
 
         this.status = null;
         this.expanded = false;
@@ -254,8 +258,8 @@ export class MLDashboard {
                     <span class="ml-stat-value bad">Service nicht erreichbar</span>
                 </div>
                 <div style="color: #8899aa; font-size: 11px; margin-top: 8px;">
-                    Der ML-Service läuft auf Port 5001.<br>
-                    Starte: <code>python ml_service.py</code>
+                    The ML service runs on port 5001.<br>
+                    Start: <code>python ml_service.py</code>
                 </div>
             `;
             return;
@@ -268,8 +272,8 @@ export class MLDashboard {
         badge.className = `ml-badge ${accuracyClass === 'bad' ? 'error' : (accuracyClass === 'neutral' ? 'warning' : '')}`;
 
         const lastTraining = this.status.lastTraining
-            ? new Date(this.status.lastTraining).toLocaleString('de-DE', {
-                day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
+            ? new Date(this.status.lastTraining).toLocaleString('en-US', {
+                month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
             })
             : '--';
 
@@ -280,8 +284,8 @@ export class MLDashboard {
                     <div class="ml-history-title">Training History</div>
                     ${this.status.history.slice(0, 5).map(h => `
                         <div class="ml-history-item">
-                            <span>${new Date(h.timestamp).toLocaleString('de-DE', {
-                day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
+                            <span>${new Date(h.timestamp).toLocaleString('en-US', {
+                month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
             })}</span>
                             <span>${(h.accuracy * 100).toFixed(1)}% (${h.samples} samples)</span>
                         </div>
@@ -300,17 +304,17 @@ export class MLDashboard {
                 <span class="ml-stat-value">${this.status.sampleCount || '--'}</span>
             </div>
             <div class="ml-stat-row">
-                <span class="ml-stat-label">Letztes Training</span>
+                <span class="ml-stat-label">Last Training</span>
                 <span class="ml-stat-value">${lastTraining}</span>
             </div>
             <div class="ml-stat-row">
                 <span class="ml-stat-label">Model Status</span>
                 <span class="ml-stat-value ${this.status.modelLoaded ? 'good' : 'bad'}">
-                    ${this.status.modelLoaded ? '✓ Aktiv' : '✗ Nicht geladen'}
+                    ${this.status.modelLoaded ? '✓ Active' : '✗ Not loaded'}
                 </span>
             </div>
             ${historyHtml}
-            <button class="ml-btn" id="mlTrainBtn">🔄 Manuelles Training</button>
+            <button class="ml-btn" id="mlTrainBtn">🔄 Manual Training</button>
         `;
 
         // Add train button handler logic
@@ -320,7 +324,7 @@ export class MLDashboard {
                 console.log('Train button clicked');
                 const btn = e.target;
                 btn.disabled = true;
-                btn.textContent = '⏳ Training läuft...';
+                btn.textContent = '⏳ Training in progress...';
 
                 try {
                     console.log(`Calling ${this.apiUrl}/train`);
@@ -338,7 +342,7 @@ export class MLDashboard {
                 }
 
                 btn.disabled = false;
-                btn.textContent = '🔄 Manuelles Training';
+                btn.textContent = '🔄 Manual Training';
             });
         }
     }
@@ -370,14 +374,21 @@ export class MLDashboard {
                 // Active Signal
                 const confidence = (result.confidence * 100).toFixed(0);
                 const rr = result.rr ? result.rr.toFixed(1) : '?';
+                const direction = result.direction || 'LONG';
+                const isShort = direction === 'SHORT';
 
-                predEl.style.background = 'rgba(0, 230, 118, 0.15)';
-                predEl.style.borderColor = '#00e676';
+                // Green for LONG, Red for SHORT
+                const color = isShort ? '#ff5252' : '#00e676';
+                const bgColor = isShort ? 'rgba(255, 82, 82, 0.15)' : 'rgba(0, 230, 118, 0.15)';
+                const icon = isShort ? '📉' : '📈';
+
+                predEl.style.background = bgColor;
+                predEl.style.borderColor = color;
 
                 predEl.innerHTML = `
-                <div style="color: #00e676; font-size: 14px; margin-bottom: 4px;">🚀 TRADE FOUND</div>
+                <div style="color: ${color}; font-size: 14px; margin-bottom: 4px;">${icon} ${direction} SIGNAL</div>
                 <div style="font-size: 11px; color: #ccc;">
-                    ${result.direction || 'LONG'} | Acc: ${confidence}% | RR: 1:${rr}
+                    ${result.setupType || 'Zone Touch'} | Conf: ${confidence}% | RR: 1:${rr}
                 </div>
             `;
             } else {

@@ -5,8 +5,12 @@
     "main": "api.js",
     "scripts": {
         "start": "node api.js",
-        "collector": "node collector.js",
-        "dev": "nodemon api.js"
+        "start:collector": "node collector-standalone.js",
+        "start:api": "node api.js",
+        "start:ml": "python3 ml_service.py",
+        "start:all": "npm run start:collector & npm run start:api & npm run start:ml",
+        "dev": "nodemon api.js",
+        "dev:collector": "nodemon collector-standalone.js"
     },
     "dependencies": {
         "better-sqlite3": "^9.2.2",

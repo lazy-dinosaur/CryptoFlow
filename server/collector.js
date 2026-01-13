@@ -15,6 +15,21 @@ const CONFIG = {
         solusdt: 0.1,
         bnbusdt: 0.1
     },
+    // Exchange configuration
+    exchanges: {
+        binance: {
+            enabled: true,
+            symbols: ['btcusdt', 'ethusdt', 'solusdt', 'bnbusdt']
+        },
+        bybit: {
+            enabled: true,
+            symbols: ['btcusdt', 'ethusdt', 'solusdt']  // Bybit doesn't have BNBUSDT perpetual
+        },
+        bitget: {
+            enabled: true,
+            symbols: ['btcusdt', 'ethusdt', 'solusdt']
+        }
+    },
     // Cleanup old data every hour
     cleanupIntervalMs: 60 * 60 * 1000,
     daysToKeep: 7,
@@ -59,15 +74,19 @@ function getState(symbol) {
 
 /**
  * Process a trade and update candles
+ * @param {string} fullSymbol - Exchange-prefixed symbol (e.g., "binance:btcusdt")
+ * @param {object} trade - Trade data
+ * @param {string} baseSymbol - Base symbol without exchange prefix (e.g., "btcusdt")
  */
-function processTrade(symbol, trade) {
-    const state = getState(symbol);
+function processTrade(fullSymbol, trade, baseSymbol = null) {
+    const symbol = baseSymbol || fullSymbol;
+    const state = getState(fullSymbol);
     const tickSize = CONFIG.tickSizes[symbol] || 1;
     const roundedPrice = roundToTick(trade.price, tickSize);
     const isBuy = trade.isBuyerMaker; // INVERTED LOGIC (Matches Frontend)
 
-    // Store raw trade
-    db.insertTrade(symbol, trade);
+    // Store raw trade (with exchange prefix)
+    db.insertTrade(fullSymbol, trade);
 
     // Update VWAP
     state.vwapSumPriceQty += trade.price * trade.quantity;
@@ -93,12 +112,12 @@ function processTrade(symbol, trade) {
     ];
 
     for (const tf of timeframes) {
-        updateCandle(symbol, trade, roundedPrice, isBuy, tf);
+        updateCandle(fullSymbol, trade, roundedPrice, isBuy, tf);
     }
 
     // Save candles periodically (every 10 seconds)
     if (Date.now() - state.lastSave > 10000) {
-        saveAllCandles(symbol);
+        saveAllCandles(fullSymbol);
         state.lastSave = Date.now();
     }
 }
@@ -191,15 +210,16 @@ function saveAllCandles(symbol) {
 /**
  * Connect to Binance WebSocket for a symbol
  */
-function connectSymbol(symbol) {
+function connectBinance(symbol) {
     const wsUrl = `wss://fstream.binance.com/ws/${symbol}@aggTrade`;
+    const fullSymbol = `binance:${symbol}`;
 
-    console.log(`🔌 Connecting to ${symbol.toUpperCase()}...`);
+    console.log(`🔌 [Binance] Connecting to ${symbol.toUpperCase()}...`);
 
     const ws = new WebSocket(wsUrl);
 
     ws.on('open', () => {
-        console.log(`✅ Connected to ${symbol.toUpperCase()}`);
+        console.log(`✅ [Binance] Connected to ${symbol.toUpperCase()}`);
     });
 
     ws.on('message', (data) => {
@@ -211,24 +231,193 @@ function connectSymbol(symbol) {
                 quantity: parseFloat(msg.q),
                 time: msg.T,
                 isBuyerMaker: msg.m,
-                tradeId: msg.a.toString()
+                tradeId: `binance_${msg.a}`
             };
 
-            processTrade(symbol, trade);
+            processTrade(fullSymbol, trade, symbol);
         } catch (err) {
-            console.error(`Error processing message for ${symbol}:`, err.message);
+            console.error(`[Binance] Error processing message for ${symbol}:`, err.message);
         }
     });
 
     ws.on('error', (err) => {
-        console.error(`❌ WebSocket error for ${symbol}:`, err.message);
+        console.error(`❌ [Binance] WebSocket error for ${symbol}:`, err.message);
     });
 
     ws.on('close', () => {
-        console.log(`⚠️ Disconnected from ${symbol.toUpperCase()}, reconnecting...`);
-        setTimeout(() => connectSymbol(symbol), CONFIG.reconnectDelayMs);
+        console.log(`⚠️ [Binance] Disconnected from ${symbol.toUpperCase()}, reconnecting...`);
+        setTimeout(() => connectBinance(symbol), CONFIG.reconnectDelayMs);
     });
 
+    return ws;
+}
+
+/**
+ * Connect to Bybit WebSocket for symbols
+ * Bybit uses a single connection with multiple subscriptions
+ */
+function connectBybit(symbols) {
+    const wsUrl = 'wss://stream.bybit.com/v5/public/linear';
+    let ws = null;
+    let pingInterval = null;
+
+    function connect() {
+        console.log(`🔌 [Bybit] Connecting...`);
+
+        ws = new WebSocket(wsUrl);
+
+        ws.on('open', () => {
+            console.log(`✅ [Bybit] Connected`);
+
+            // Subscribe to all symbols
+            const args = symbols.map(s => `publicTrade.${s.toUpperCase()}`);
+            ws.send(JSON.stringify({
+                op: 'subscribe',
+                args: args
+            }));
+
+            // Bybit requires ping every 20 seconds
+            pingInterval = setInterval(() => {
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ op: 'ping' }));
+                }
+            }, 20000);
+        });
+
+        ws.on('message', (data) => {
+            try {
+                const msg = JSON.parse(data);
+
+                // Handle pong
+                if (msg.op === 'pong' || msg.ret_msg === 'pong') return;
+
+                // Handle subscription confirmation
+                if (msg.op === 'subscribe') {
+                    if (msg.success) {
+                        console.log(`📡 [Bybit] Subscribed to: ${symbols.map(s => s.toUpperCase()).join(', ')}`);
+                    }
+                    return;
+                }
+
+                // Handle trade data
+                if (msg.topic && msg.topic.startsWith('publicTrade.') && msg.data) {
+                    const symbol = msg.topic.replace('publicTrade.', '').toLowerCase();
+                    const fullSymbol = `bybit:${symbol}`;
+
+                    for (const t of msg.data) {
+                        const trade = {
+                            price: parseFloat(t.p),
+                            quantity: parseFloat(t.v),
+                            time: t.T,
+                            isBuyerMaker: t.S === 'Sell',  // Bybit: "Buy" = buyer aggressor, "Sell" = seller aggressor
+                            tradeId: `bybit_${t.i}`
+                        };
+
+                        processTrade(fullSymbol, trade, symbol);
+                    }
+                }
+            } catch (err) {
+                console.error(`[Bybit] Error processing message:`, err.message);
+            }
+        });
+
+        ws.on('error', (err) => {
+            console.error(`❌ [Bybit] WebSocket error:`, err.message);
+        });
+
+        ws.on('close', () => {
+            console.log(`⚠️ [Bybit] Disconnected, reconnecting...`);
+            if (pingInterval) clearInterval(pingInterval);
+            setTimeout(connect, CONFIG.reconnectDelayMs);
+        });
+    }
+
+    connect();
+    return ws;
+}
+
+/**
+ * Connect to Bitget WebSocket for symbols
+ */
+function connectBitget(symbols) {
+    const wsUrl = 'wss://ws.bitget.com/v2/ws/public';
+    let ws = null;
+    let pingInterval = null;
+
+    function connect() {
+        console.log(`🔌 [Bitget] Connecting...`);
+
+        ws = new WebSocket(wsUrl);
+
+        ws.on('open', () => {
+            console.log(`✅ [Bitget] Connected`);
+
+            // Subscribe to all symbols
+            const args = symbols.map(s => ({
+                instType: 'USDT-FUTURES',
+                channel: 'trade',
+                instId: s.toUpperCase()
+            }));
+            ws.send(JSON.stringify({
+                op: 'subscribe',
+                args: args
+            }));
+
+            // Bitget requires ping every 30 seconds
+            pingInterval = setInterval(() => {
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send('ping');
+                }
+            }, 30000);
+        });
+
+        ws.on('message', (data) => {
+            try {
+                // Handle pong
+                if (data.toString() === 'pong') return;
+
+                const msg = JSON.parse(data);
+
+                // Handle subscription confirmation
+                if (msg.event === 'subscribe') {
+                    console.log(`📡 [Bitget] Subscribed to: ${symbols.map(s => s.toUpperCase()).join(', ')}`);
+                    return;
+                }
+
+                // Handle trade data
+                if (msg.action === 'snapshot' && msg.arg?.channel === 'trade' && msg.data) {
+                    const symbol = msg.arg.instId.toLowerCase();
+                    const fullSymbol = `bitget:${symbol}`;
+
+                    for (const t of msg.data) {
+                        const trade = {
+                            price: parseFloat(t.price),
+                            quantity: parseFloat(t.size),
+                            time: parseInt(t.ts),
+                            isBuyerMaker: t.side === 'sell',  // Bitget: "buy" = buyer aggressor
+                            tradeId: `bitget_${t.tradeId}`
+                        };
+
+                        processTrade(fullSymbol, trade, symbol);
+                    }
+                }
+            } catch (err) {
+                console.error(`[Bitget] Error processing message:`, err.message);
+            }
+        });
+
+        ws.on('error', (err) => {
+            console.error(`❌ [Bitget] WebSocket error:`, err.message);
+        });
+
+        ws.on('close', () => {
+            console.log(`⚠️ [Bitget] Disconnected, reconnecting...`);
+            if (pingInterval) clearInterval(pingInterval);
+            setTimeout(connect, CONFIG.reconnectDelayMs);
+        });
+    }
+
+    connect();
     return ws;
 }
 
@@ -299,18 +488,30 @@ function start() {
 
     const DepthCollector = require('./depth-collector.js');
 
-    // ... (existing code)
+    // Connect to Binance
+    if (CONFIG.exchanges.binance.enabled) {
+        console.log(`\n📊 [Binance] Symbols: ${CONFIG.exchanges.binance.symbols.join(', ')}`);
+        for (const symbol of CONFIG.exchanges.binance.symbols) {
+            connectBinance(symbol);
 
-    // Connect to all symbols
-    for (const symbol of CONFIG.symbols) {
-        connectSymbol(symbol);
-
-        // 🔥 START DEPTH COLLECTOR (BTC ONLY)
-        // We only collect depth history for BTC to save resources and allow deeper storage
-        if (symbol.toLowerCase() === 'btcusdt') {
-            const dc = new DepthCollector(symbol);
-            dc.start();
+            // 🔥 START DEPTH COLLECTOR (BTC ONLY)
+            if (symbol.toLowerCase() === 'btcusdt') {
+                const dc = new DepthCollector(`binance:${symbol}`);
+                dc.start();
+            }
         }
+    }
+
+    // Connect to Bybit
+    if (CONFIG.exchanges.bybit.enabled) {
+        console.log(`\n📊 [Bybit] Symbols: ${CONFIG.exchanges.bybit.symbols.join(', ')}`);
+        connectBybit(CONFIG.exchanges.bybit.symbols);
+    }
+
+    // Connect to Bitget
+    if (CONFIG.exchanges.bitget.enabled) {
+        console.log(`\n📊 [Bitget] Symbols: ${CONFIG.exchanges.bitget.symbols.join(', ')}`);
+        connectBitget(CONFIG.exchanges.bitget.symbols);
     }
 
     // Periodic cleanup
@@ -324,8 +525,9 @@ function start() {
     // Save all candles on exit
     process.on('SIGINT', () => {
         console.log('\n🛑 Shutting down...');
-        for (const symbol of CONFIG.symbols) {
-            saveAllCandles(symbol);
+        // Save candles for all exchange:symbol combinations
+        for (const [fullSymbol] of symbolState) {
+            saveAllCandles(fullSymbol);
         }
         console.log('✅ All candles saved');
         process.exit(0);

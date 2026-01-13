@@ -10,8 +10,8 @@ export class VpsAPI {
 
         // If dev (localhost), point to VPS IP. If prod (on VPS), use relative path to avoid CORS/Network issues.
         // If dev (localhost), point to VPS IP (Secure WSS). If prod (on VPS), use relative WSS default (443).
-        const defaultBase = isLocalHost ? 'https://100.86.66.124' : '';
-        const defaultWs = isLocalHost ? 'wss://100.86.66.124' : `wss://${window.location.hostname}`;
+        const defaultBase = isLocalHost ? 'http://134.185.107.33:3000' : '';
+        const defaultWs = isLocalHost ? 'ws://134.185.107.33:3000' : `wss://${window.location.hostname}`;
 
         this.baseUrl = options.baseUrl || defaultBase;
         this.wsUrl = options.wsUrl || defaultWs;
@@ -34,6 +34,21 @@ export class VpsAPI {
 
         // Current subscription
         this.currentSymbol = null;
+        this.currentExchange = 'binance';  // Default exchange
+    }
+
+    /**
+     * Set current exchange
+     */
+    setExchange(exchange) {
+        this.currentExchange = exchange.toLowerCase();
+    }
+
+    /**
+     * Get current exchange
+     */
+    getExchange() {
+        return this.currentExchange;
     }
 
     /**
@@ -62,10 +77,11 @@ export class VpsAPI {
     /**
      * Get historical candles
      */
-    async getCandles(symbol, timeframe = 1, limit = 100) {
+    async getCandles(symbol, timeframe = 1, limit = 100, exchange = null) {
+        const ex = exchange || this.currentExchange;
         try {
             const response = await fetch(
-                `${this.baseUrl}/api/candles?symbol=${symbol}&tf=${timeframe}&limit=${limit}`
+                `${this.baseUrl}/api/candles?symbol=${symbol}&tf=${timeframe}&limit=${limit}&exchange=${ex}`
             );
             const data = await response.json();
             return data.candles || [];
@@ -78,10 +94,11 @@ export class VpsAPI {
     /**
      * Get historical trades
      */
-    async getTrades(symbol, limit = 10000) {
+    async getTrades(symbol, limit = 10000, exchange = null) {
+        const ex = exchange || this.currentExchange;
         try {
             const response = await fetch(
-                `${this.baseUrl}/api/trades?symbol=${symbol}&limit=${limit}`
+                `${this.baseUrl}/api/trades?symbol=${symbol}&limit=${limit}&exchange=${ex}`
             );
             const data = await response.json();
             return data.trades || [];
@@ -94,16 +111,31 @@ export class VpsAPI {
     /**
      * Get session data (PVOC, etc)
      */
-    async getSessionData(symbol) {
+    async getSessionData(symbol, exchange = null) {
+        const ex = exchange || this.currentExchange;
         try {
             const response = await fetch(
-                `${this.baseUrl}/api/session?symbol=${symbol}`
+                `${this.baseUrl}/api/session?symbol=${symbol}&exchange=${ex}`
             );
             const data = await response.json();
             return data.previous || null;
         } catch (err) {
             console.error('Failed to fetch session data from VPS:', err.message);
             return null;
+        }
+    }
+
+    /**
+     * Get available exchanges and symbols
+     */
+    async getExchanges() {
+        try {
+            const response = await fetch(`${this.baseUrl}/api/symbols`);
+            const data = await response.json();
+            return data.exchanges || { binance: [], bybit: [] };
+        } catch (err) {
+            console.error('Failed to fetch exchanges from VPS:', err.message);
+            return { binance: [], bybit: [] };
         }
     }
 

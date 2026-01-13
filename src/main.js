@@ -31,8 +31,12 @@ class CryptoFlowApp {
         this.volumeProfile = null;
         this.orderBook = null;
 
+        // Current exchange
+        this.currentExchange = 'binance';
+
         // DOM elements
         this.elements = {
+            exchangeSelect: document.getElementById('exchangeSelect'),
             symbolSelect: document.getElementById('symbolSelect'),
             connectionStatus: document.getElementById('connectionStatus'),
             priceDisplay: document.getElementById('priceDisplay'),
@@ -226,6 +230,13 @@ class CryptoFlowApp {
         window.onclick = (e) => {
             if (e.target == modal) modal.style.display = "none";
         };
+
+        // Exchange selector
+        if (this.elements.exchangeSelect) {
+            this.elements.exchangeSelect.addEventListener('change', (e) => {
+                this._switchExchange(e.target.value);
+            });
+        }
 
         // Symbol selector
         this.elements.symbolSelect.addEventListener('change', (e) => {
@@ -558,6 +569,40 @@ class CryptoFlowApp {
     }
 
     /**
+     * Switch to a different exchange
+     * @param {string} exchange
+     */
+    async _switchExchange(exchange) {
+        exchange = exchange.toLowerCase();
+        this.currentExchange = exchange;
+        vpsAPI.setExchange(exchange);
+
+        // Update symbol dropdown based on exchange
+        const symbolsForExchange = {
+            binance: ['btcusdt', 'ethusdt', 'solusdt', 'bnbusdt'],
+            bybit: ['btcusdt', 'ethusdt', 'solusdt'],
+            bitget: ['btcusdt', 'ethusdt', 'solusdt']
+        };
+
+        const symbols = symbolsForExchange[exchange] || symbolsForExchange.binance;
+
+        // Update dropdown options
+        if (this.elements.symbolSelect) {
+            this.elements.symbolSelect.innerHTML = symbols.map(s =>
+                `<option value="${s}">${s.toUpperCase()}</option>`
+            ).join('');
+        }
+
+        // If current symbol not available on new exchange, switch to first available
+        if (!symbols.includes(this.currentSymbol)) {
+            this.currentSymbol = symbols[0];
+        }
+
+        // Reload data for current symbol on new exchange
+        await this._switchSymbol(this.currentSymbol);
+    }
+
+    /**
      * Switch to a different trading symbol
      * @param {string} symbol
      */
@@ -603,9 +648,10 @@ class CryptoFlowApp {
             this.orderBook.setPrecision(2);
         }
 
-        // Load historical data - try VPS candles first (faster), then Binance trades fallback
+        // Load historical data - try VPS candles first (faster), then direct exchange fallback
+        const exchangeName = (this.currentExchange || 'binance').charAt(0).toUpperCase() + (this.currentExchange || 'binance').slice(1);
         try {
-            this._updateLoadingText('Connecting to VPS...');
+            this._updateLoadingText(`Connecting to VPS (${exchangeName})...`);
 
             // Try to get pre-aggregated candles from VPS (much faster than raw trades)
             let vpsAvailable = false;
@@ -618,7 +664,7 @@ class CryptoFlowApp {
                     const vpsCandles = await vpsAPI.getCandles(symbol, this.currentTimeframe, candlesNeeded);
 
                     if (vpsCandles && vpsCandles.length > 0) {
-                        this._updateLoadingText(`✅ VPS: Importing ${vpsCandles.length} candles...`);
+                        this._updateLoadingText(`✅ ${exchangeName}: Importing ${vpsCandles.length} candles...`);
                         await new Promise(r => setTimeout(r, 500)); // Show success briefly
 
                         dataAggregator.importCandles(vpsCandles);

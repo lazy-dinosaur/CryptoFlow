@@ -11,7 +11,8 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const db = require('./db.js');
-const { start: startCollector, CONFIG } = require('./collector.js');
+// Collector runs separately - only import CONFIG for symbol info
+const { CONFIG } = require('./collector.js');
 
 // Configuration
 const PORT = process.env.PORT || 443;  // HTTPS port (also handles WSS)
@@ -50,23 +51,32 @@ app.get('/api/health', (req, res) => {
 });
 
 /**
- * Get available symbols
+ * Get available symbols and exchanges
  */
 app.get('/api/symbols', (req, res) => {
     res.json({
         symbols: CONFIG.symbols.map(s => s.toUpperCase()),
-        tickSizes: CONFIG.tickSizes
+        tickSizes: CONFIG.tickSizes,
+        exchanges: {
+            binance: CONFIG.exchanges?.binance?.symbols?.map(s => s.toUpperCase()) || CONFIG.symbols.map(s => s.toUpperCase()),
+            bybit: CONFIG.exchanges?.bybit?.symbols?.map(s => s.toUpperCase()) || [],
+            bitget: CONFIG.exchanges?.bitget?.symbols?.map(s => s.toUpperCase()) || []
+        }
     });
 });
 
 /**
  * Get candles for a symbol and timeframe
- * Query params: symbol, tf (1, 5, 15, 60), limit
+ * Query params: symbol, tf (1, 5, 15, 60), limit, exchange (binance/bybit)
  */
 app.get('/api/candles', (req, res) => {
-    const symbol = (req.query.symbol || 'btcusdt').toLowerCase();
+    const baseSymbol = (req.query.symbol || 'btcusdt').toLowerCase();
+    const exchange = (req.query.exchange || 'binance').toLowerCase();
     const tf = parseInt(req.query.tf || '1', 10);
     const limit = parseInt(req.query.limit || '1000', 10);
+
+    // Build full symbol with exchange prefix
+    const fullSymbol = `${exchange}:${baseSymbol}`;
 
     const tableMap = {
         1: 'candles_1',
@@ -81,8 +91,8 @@ app.get('/api/candles', (req, res) => {
     }
 
     try {
-        const candles = db.getCandles(table, symbol, Math.min(limit, 5000));
-        res.json({ candles });
+        const candles = db.getCandles(table, fullSymbol, Math.min(limit, 5000));
+        res.json({ candles, exchange, symbol: baseSymbol.toUpperCase() });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -90,19 +100,22 @@ app.get('/api/candles', (req, res) => {
 
 /**
  * Get raw trades
- * Query params: symbol, from (timestamp), to (timestamp), limit
+ * Query params: symbol, from (timestamp), to (timestamp), limit, exchange (binance/bybit/bitget)
  */
 app.get('/api/trades', (req, res) => {
-    const symbol = (req.query.symbol || 'btcusdt').toLowerCase();
+    const baseSymbol = (req.query.symbol || 'btcusdt').toLowerCase();
+    const exchange = (req.query.exchange || 'binance').toLowerCase();
     const limit = parseInt(req.query.limit || '10000', 10);
+
+    const fullSymbol = `${exchange}:${baseSymbol}`;
 
     try {
         if (req.query.from && req.query.to) {
-            const trades = db.getTrades(symbol, parseInt(req.query.from), parseInt(req.query.to));
-            res.json({ trades });
+            const trades = db.getTrades(fullSymbol, parseInt(req.query.from), parseInt(req.query.to));
+            res.json({ trades, exchange });
         } else {
-            const trades = db.getLatestTrades(symbol, Math.min(limit, 50000));
-            res.json({ trades });
+            const trades = db.getLatestTrades(fullSymbol, Math.min(limit, 50000));
+            res.json({ trades, exchange });
         }
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -113,15 +126,16 @@ app.get('/api/trades', (req, res) => {
  * Get session markers (VWAP, POC, PVOC)
  */
 app.get('/api/session', (req, res) => {
-    const symbol = (req.query.symbol || 'btcusdt').toLowerCase();
+    const baseSymbol = (req.query.symbol || 'btcusdt').toLowerCase();
+    const exchange = (req.query.exchange || 'binance').toLowerCase();
+    const fullSymbol = `${exchange}:${baseSymbol}`;
 
     try {
-        const previousSession = db.getPreviousSession(symbol);
+        const previousSession = db.getPreviousSession(fullSymbol);
 
-        // Note: Current session data is in collector's memory
-        // For full implementation, collector would expose current state
         res.json({
-            previous: previousSession || null
+            previous: previousSession || null,
+            exchange
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -130,17 +144,20 @@ app.get('/api/session', (req, res) => {
 
 /**
  * Get heatmap snapshots
- * Query params: symbol, since (timestamp), limit
+ * Query params: symbol, since (timestamp), limit, exchange
  */
 app.get('/api/depth', (req, res) => {
-    const symbol = (req.query.symbol || 'btcusdt').toLowerCase();
+    const baseSymbol = (req.query.symbol || 'btcusdt').toLowerCase();
+    const exchange = (req.query.exchange || 'binance').toLowerCase();
     const since = parseInt(req.query.since || '0', 10);
     const limit = parseInt(req.query.limit || '1000', 10);
     const step = parseInt(req.query.step || '1', 10);
 
+    const fullSymbol = `${exchange}:${baseSymbol}`;
+
     try {
-        const snapshots = db.getSnapshots(symbol, since, limit, step);
-        res.json({ snapshots });
+        const snapshots = db.getSnapshots(fullSymbol, since, limit, step);
+        res.json({ snapshots, exchange });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -158,7 +175,7 @@ app.get('/api/depth', (req, res) => {
  * Proxy requests to Python ML Service (Port 5001)
  * Frontend -> Node (443) -> Python (5001)
  */
-app.all('/api/ml/*', async (req, res) => {
+app.all('/api/ml/{*path}', async (req, res) => {
     // SECURITY: Protect training endpoint
     if (req.url.includes('/train')) {
         const apiKey = req.headers['x-api-key'];
@@ -308,8 +325,8 @@ function start() {
         console.log(`📡 WebSocket running on wss://localhost:${PORT}`);
     });
 
-    // Start data collector
-    startCollector();
+    // Note: Collector runs separately via pm2 (npm run start:collector)
+    console.log('💡 Collector should be started separately: npm run start:collector');
 }
 
 // Start if run directly

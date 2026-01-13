@@ -9,6 +9,10 @@ export class DepthHeatmapStore {
         this.maxSnapshots = options.maxSnapshots || 2500; // 40h history with step=60
         this.snapshotInterval = options.snapshotInterval || 1000; // 1 second
 
+        // Detect environment - use VPS URL when running locally
+        const isLocalHost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+        this.baseUrl = isLocalHost ? 'http://134.185.107.33:3000' : '';
+
         // Filter dust (Binance futures quantities can be < 1.0 frequently)
         this.minVolumeForHeatmap = options.minVolume ?? 0.01;
 
@@ -41,7 +45,7 @@ export class DepthHeatmapStore {
                 step: '60'
             });
 
-            const res = await fetch(`/api/depth?${qs.toString()}`);
+            const res = await fetch(`${this.baseUrl}/api/depth?${qs.toString()}`);
             const data = await res.json();
 
             if (data.snapshots && data.snapshots.length > 0) {
@@ -74,7 +78,7 @@ export class DepthHeatmapStore {
                     step: '1'   // No downsampling
                 });
 
-                const res = await fetch(`/api/depth?${qs.toString()}`);
+                const res = await fetch(`${this.baseUrl}/api/depth?${qs.toString()}`);
                 const data = await res.json();
 
                 if (data.snapshots && data.snapshots.length > 0) {

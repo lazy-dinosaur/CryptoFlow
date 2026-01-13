@@ -158,89 +158,142 @@ def predict_raw_candles(candles):
         support_zones = find_support_zones(df, idx)
         resistance_zones = find_resistance_zones(df, idx)
         
-        # 3. Check Sequence: Is price touching a support zone? (LONG Setup)
-        # Using the same logic as training
+        # 3. Check for LONG Setup (Support Zone touch)
         touching_support = None
         for zone in support_zones:
-            # Check proximity (using TOLERANCE from trainer)
             dist = abs(current_candle['low'] - zone['price'])
             if dist < current_candle['close'] * TOLERANCE:
                 touching_support = zone
                 break
-                
-        if not touching_support:
-            return {'signal': False, 'message': 'Scanning... No Support Zone touch'}, 200
-            
-        # 4. Calculate Trade Params (Entry, SL, TP)
-        entry = current_candle['close']
-        # SL below zone or low
-        sl = min(current_candle['low'], touching_support['price']) * 0.9995
-        risk = entry - sl
-        
-        if risk <= 0:
-            return {'signal': False, 'message': 'Invalid Risk'}, 200
-            
-        # Find TP (Next Resistance)
-        tp = None
-        min_dist_to_res = float('inf')
-        
+
+        # 3b. Check for SHORT Setup (Resistance Zone touch)
+        touching_resistance = None
         for zone in resistance_zones:
-            if zone['price'] > entry:
-                dist = zone['price'] - entry
-                if dist < min_dist_to_res:
-                    min_dist_to_res = dist
-                    tp = zone['price']
-                    
-        # Default TP if no resistance found (1:2 RR)
-        if not tp:
-            tp = entry + (risk * 2)
-            
-        rr = (tp - entry) / risk
-        if rr < 1.0: # Filter bad RR
-             return {'signal': False, 'message': f'Bad RR ({rr:.2f})'}, 200
-             
+            dist = abs(current_candle['high'] - zone['price'])
+            if dist < current_candle['close'] * TOLERANCE:
+                touching_resistance = zone
+                break
+
+        # Determine direction based on zone touch and candle pattern
+        direction = None
+        touching_zone = None
+
+        # LONG: Touching support + green candle + positive delta
+        if touching_support:
+            is_green = current_candle['close'] > current_candle['open']
+            has_positive_delta = current_candle.get('delta', 0) > 0
+            if is_green and has_positive_delta:
+                direction = 'LONG'
+                touching_zone = touching_support
+
+        # SHORT: Touching resistance + red candle + negative delta
+        if touching_resistance and direction is None:
+            is_red = current_candle['close'] < current_candle['open']
+            has_negative_delta = current_candle.get('delta', 0) < 0
+            if is_red and has_negative_delta:
+                direction = 'SHORT'
+                touching_zone = touching_resistance
+
+        if direction is None:
+            return {'signal': False, 'message': 'Scanning... No valid zone touch'}, 200
+
+        # 4. Calculate Trade Params based on direction
+        entry = current_candle['close']
+
+        if direction == 'LONG':
+            # LONG: SL below support, TP at resistance
+            sl = min(current_candle['low'], touching_zone['price']) * 0.9995
+            risk = entry - sl
+
+            if risk <= 0:
+                return {'signal': False, 'message': 'Invalid Risk'}, 200
+
+            # Find TP (Next Resistance)
+            tp = None
+            min_dist = float('inf')
+            for zone in resistance_zones:
+                if zone['price'] > entry:
+                    dist = zone['price'] - entry
+                    if dist < min_dist:
+                        min_dist = dist
+                        tp = zone['price']
+
+            if not tp:
+                tp = entry + (risk * 2)
+
+            rr = (tp - entry) / risk
+            setup_type = 'Support Bounce'
+
+        else:  # SHORT
+            # SHORT: SL above resistance, TP at support
+            sl = max(current_candle['high'], touching_zone['price']) * 1.0005
+            risk = sl - entry
+
+            if risk <= 0:
+                return {'signal': False, 'message': 'Invalid Risk'}, 200
+
+            # Find TP (Next Support)
+            tp = None
+            min_dist = float('inf')
+            for zone in support_zones:
+                if zone['price'] < entry:
+                    dist = entry - zone['price']
+                    if dist < min_dist:
+                        min_dist = dist
+                        tp = zone['price']
+
+            if not tp:
+                tp = entry - (risk * 2)
+
+            rr = (entry - tp) / risk
+            setup_type = 'Resistance Rejection'
+
+        if rr < 1.0:
+            return {'signal': False, 'message': f'Bad RR ({rr:.2f})'}, 200
+
         # 5. Extract Features for Model
-        # We must manually inject the zone features that regular extract_features might miss
         features = extract_features(df, idx)
         if features is None:
             return {'error': 'Feature extraction failed'}, 500
-            
+
         # Add Zone Features
-        features['zone_distance'] = abs(current_candle['low'] - touching_support['price'])
-        features['zone_age'] = idx - touching_support['idx']
-        features['zone_strength'] = touching_support['strength']
+        if direction == 'LONG':
+            features['zone_distance'] = abs(current_candle['low'] - touching_zone['price'])
+        else:
+            features['zone_distance'] = abs(current_candle['high'] - touching_zone['price'])
+        features['zone_age'] = idx - touching_zone['idx']
+        features['zone_strength'] = touching_zone['strength']
         features['risk_reward'] = rr
-        
+        features['is_short'] = 1 if direction == 'SHORT' else 0
+
         # Ensure all model columns exist
         input_df = pd.DataFrame([features])
         for col in feature_columns:
             if col not in input_df.columns:
                 input_df[col] = 0.0
-        
+
         X = input_df[feature_columns]
-        
+
         # 6. Predict
         pred = model.predict(X)[0]
         proba = model.predict_proba(X)[0]
         confidence = proba[1] if pred == 1 else proba[0]
-        
+
         # 7. Final Output Decision
-        # Only signal if Model predicts WIN with high confidence OR if it matches our basic setup
-        # User wants "sure" -> Threshold 0.6
         if pred == 1 and confidence > 0.6:
             return {
                 'signal': True,
-                'direction': 'LONG',
-                'setupType': 'Support Bounce',
+                'direction': direction,
+                'setupType': setup_type,
                 'entry': float(entry),
                 'sl': float(sl),
                 'tp': float(tp),
                 'rr': float(rr),
                 'confidence': float(confidence),
-                'zonePrice': float(touching_support['price'])
+                'zonePrice': float(touching_zone['price'])
             }, 200
         else:
-             return {'signal': False, 'message': f'Weak Signal ({confidence*100:.0f}%)'}, 200
+            return {'signal': False, 'message': f'Weak Signal ({confidence*100:.0f}%)'}, 200
 
     except Exception as e:
         print(f"Raw prediction error: {e}")

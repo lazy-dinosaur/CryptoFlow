@@ -332,14 +332,20 @@ def find_resistance_zones(df, idx):
     
     return zones
 
-def backtest_signal(df, idx, entry, sl, tp):
+def backtest_signal(df, idx, entry, sl, tp, direction='LONG'):
     """Backtest a signal and return result."""
     for j in range(idx + 1, len(df)):
         future = df.iloc[j]
-        if future['low'] <= sl:
-            return 'loss'
-        if future['high'] >= tp:
-            return 'win'
+        if direction == 'LONG':
+            if future['low'] <= sl:
+                return 'loss'
+            if future['high'] >= tp:
+                return 'win'
+        else:  # SHORT
+            if future['high'] >= sl:
+                return 'loss'
+            if future['low'] <= tp:
+                return 'win'
     return 'active'
 
 def load_depth_data(db_path, symbol='BTCUSDT'):
@@ -403,83 +409,110 @@ def load_whale_trades(db_path, symbol='btcusdt', threshold=5.0):
 
 
 def generate_training_data(df, depth_data=None, whale_trades=None):
-    """Generate training dataset with features and labels."""
+    """Generate training dataset with features and labels (LONG + SHORT)."""
     X = []
     y = []
-    
-    print("Generating training data with enhanced features...")
-    
+
+    print("Generating training data with enhanced features (LONG + SHORT)...")
+
+    long_count = 0
+    short_count = 0
+
     for idx in range(10, len(df) - 10):  # Need buffer on both sides
         candle = df.iloc[idx]
-        
-        # Basic filters
+
+        support_zones = find_support_zones(df, idx)
+        resistance_zones = find_resistance_zones(df, idx)
+
+        # ========== LONG SETUP ==========
         is_green = candle['close'] > candle['open']
         has_positive_delta = candle['delta'] > 0
-        
-        if not (is_green and has_positive_delta):
-            continue
-        
-        # Find support zones
-        support_zones = find_support_zones(df, idx)
-        
-        # Check if candle touches any support zone
-        touching_support = None
-        for zone in support_zones:
-            if abs(candle['low'] - zone['price']) < candle['close'] * TOLERANCE:
-                touching_support = zone
-                break
-        
-        if not touching_support:
-            continue
-        
-        # Define entry, SL, TP
-        entry = candle['close']
-        sl = min(candle['low'], touching_support['price']) * 0.9997
-        risk = entry - sl
-        
-        if risk <= 0:
-            continue
-        
-        # Find resistance for TP
-        resistance_zones = find_resistance_zones(df, idx)
-        
-        target_resistance = None
-        min_dist = float('inf')
-        for zone in resistance_zones:
-            if zone['price'] > entry:
-                dist = zone['price'] - entry
-                if dist < min_dist:
-                    min_dist = dist
-                    target_resistance = zone
-        
-        if not target_resistance or min_dist < risk * MIN_RR:
-            continue
-        
-        tp = target_resistance['price']
-        
-        # Backtest the signal
-        result = backtest_signal(df, idx, entry, sl, tp)
-        
-        if result == 'active':
-            continue  # Skip signals without clear outcome
-        
-        # Extract features WITH new data sources
-        features = extract_features(df, idx, depth_data, whale_trades)
-        if features is None:
-            continue
-        
-        # Add zone-specific features
-        features['zone_distance'] = abs(candle['low'] - touching_support['price'])
-        features['zone_age'] = idx - touching_support['idx']
-        features['zone_strength'] = touching_support['strength']
-        features['risk_reward'] = min_dist / risk
-        
-        X.append(features)
-        y.append(1 if result == 'win' else 0)
-    
-    print(f"Generated {len(X)} training samples")
+
+        if is_green and has_positive_delta:
+            touching_support = None
+            for zone in support_zones:
+                if abs(candle['low'] - zone['price']) < candle['close'] * TOLERANCE:
+                    touching_support = zone
+                    break
+
+            if touching_support:
+                entry = candle['close']
+                sl = min(candle['low'], touching_support['price']) * 0.9997
+                risk = entry - sl
+
+                if risk > 0:
+                    target_resistance = None
+                    min_dist = float('inf')
+                    for zone in resistance_zones:
+                        if zone['price'] > entry:
+                            dist = zone['price'] - entry
+                            if dist < min_dist:
+                                min_dist = dist
+                                target_resistance = zone
+
+                    if target_resistance and min_dist >= risk * MIN_RR:
+                        tp = target_resistance['price']
+                        result = backtest_signal(df, idx, entry, sl, tp, 'LONG')
+
+                        if result != 'active':
+                            features = extract_features(df, idx, depth_data, whale_trades)
+                            if features:
+                                features['zone_distance'] = abs(candle['low'] - touching_support['price'])
+                                features['zone_age'] = idx - touching_support['idx']
+                                features['zone_strength'] = touching_support['strength']
+                                features['risk_reward'] = min_dist / risk
+                                features['is_short'] = 0
+
+                                X.append(features)
+                                y.append(1 if result == 'win' else 0)
+                                long_count += 1
+
+        # ========== SHORT SETUP ==========
+        is_red = candle['close'] < candle['open']
+        has_negative_delta = candle['delta'] < 0
+
+        if is_red and has_negative_delta:
+            touching_resistance = None
+            for zone in resistance_zones:
+                if abs(candle['high'] - zone['price']) < candle['close'] * TOLERANCE:
+                    touching_resistance = zone
+                    break
+
+            if touching_resistance:
+                entry = candle['close']
+                sl = max(candle['high'], touching_resistance['price']) * 1.0003
+                risk = sl - entry
+
+                if risk > 0:
+                    target_support = None
+                    min_dist = float('inf')
+                    for zone in support_zones:
+                        if zone['price'] < entry:
+                            dist = entry - zone['price']
+                            if dist < min_dist:
+                                min_dist = dist
+                                target_support = zone
+
+                    if target_support and min_dist >= risk * MIN_RR:
+                        tp = target_support['price']
+                        result = backtest_signal(df, idx, entry, sl, tp, 'SHORT')
+
+                        if result != 'active':
+                            features = extract_features(df, idx, depth_data, whale_trades)
+                            if features:
+                                features['zone_distance'] = abs(candle['high'] - touching_resistance['price'])
+                                features['zone_age'] = idx - touching_resistance['idx']
+                                features['zone_strength'] = touching_resistance['strength']
+                                features['risk_reward'] = min_dist / risk
+                                features['is_short'] = 1
+
+                                X.append(features)
+                                y.append(1 if result == 'win' else 0)
+                                short_count += 1
+
+    print(f"Generated {len(X)} training samples (LONG: {long_count}, SHORT: {short_count})")
     print(f"Win rate: {sum(y)/len(y)*100:.1f}%" if y else "No samples")
-    
+
     return pd.DataFrame(X), np.array(y)
 
 def train_model(X, y):
