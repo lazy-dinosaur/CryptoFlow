@@ -480,16 +480,18 @@ class MLAPIHandler(BaseHTTPRequestHandler):
             
             candles = data.get('candles', [])
             result = predict_raw_candles(candles)
-            
-            # predict_raw_candles returns tuple (result, confidence) or (dict, status)
-            if isinstance(result, tuple) and isinstance(result[0], dict):
-                 # Error case
-                 self.send_error(result[1], result[0]['error'])
+
+            # predict_raw_candles returns tuple (dict, status_code)
+            if isinstance(result, tuple):
+                response_data, status_code = result
+                if status_code == 200:
+                    self.send_json(response_data)
+                else:
+                    # Error case
+                    error_msg = response_data.get('error', 'Unknown error')
+                    self.send_error(status_code, error_msg)
             else:
-                self.send_json({
-                    'prediction': result[0],
-                    'confidence': result[1]
-                })
+                self.send_json(result)
         else:
             self.send_error(404, 'Not found')
     
