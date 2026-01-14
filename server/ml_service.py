@@ -60,14 +60,33 @@ def init_status_db():
     """)
     
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS predictions (
+        CREATE TABLE IF NOT EXISTS signals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp TEXT,
             symbol TEXT,
-            candle_time INTEGER,
+            exchange TEXT,
+            direction TEXT,
+            setup_type TEXT,
+            entry REAL,
+            sl REAL,
+            tp REAL,
+            rr REAL,
+            zone_price REAL,
             confidence REAL,
-            prediction TEXT,
-            actual_result TEXT
+            status TEXT DEFAULT 'ACTIVE',
+            closed_at TEXT,
+            pnl_percent REAL,
+            -- Key metrics for quick queries
+            delta REAL,
+            delta_pct REAL,
+            volume_ratio REAL,
+            cvd_slope REAL,
+            imbalance_ratio REAL,
+            zone_age INTEGER,
+            zone_strength REAL,
+            whale_intensity REAL,
+            -- Full features as JSON backup
+            features_json TEXT
         )
     """)
     
@@ -129,13 +148,14 @@ def predict_signal(candle_features):
         print(f"Prediction error: {e}")
         return None, 0.0
 
-def predict_raw_candles(candles):
+def predict_raw_candles(candles, symbol='BTCUSDT', exchange='binance'):
     """
     Smart Prediction:
     1. Reconstruct Zones (Support/Resistance)
     2. Check if current candle triggers a Setup (Zone Touch + filters)
     3. If Setup Valid -> Extract Features -> Predict
     4. Return full trade plan (Entry, SL, TP) if confident
+    5. Save signal to database for tracking
     """
     global model, feature_columns
     
@@ -287,6 +307,21 @@ def predict_raw_candles(candles):
 
         # 7. Final Output Decision
         if pred == 1 and confidence > 0.6:
+            # Save signal to database
+            save_signal(
+                symbol=symbol,
+                exchange=exchange,
+                direction=direction,
+                setup_type=setup_type,
+                entry=float(entry),
+                sl=float(sl),
+                tp=float(tp),
+                rr=float(rr),
+                zone_price=float(touching_zone['price']),
+                confidence=float(confidence),
+                features=features
+            )
+
             return {
                 'signal': True,
                 'direction': direction,
@@ -400,6 +435,91 @@ def save_training_record(sample_count, accuracy, win_rate, top_features,
 
     conn.commit()
     conn.close()
+
+
+def save_signal(symbol, exchange, direction, setup_type, entry, sl, tp, rr, zone_price, confidence, features=None):
+    """Save a signal to the database with detailed metrics."""
+    try:
+        conn = sqlite3.connect(STATUS_DB_PATH)
+        cursor = conn.cursor()
+
+        # Extract key metrics from features
+        delta = features.get('delta', 0) if features else 0
+        delta_pct = features.get('delta_pct', 0) if features else 0
+        volume_ratio = features.get('volume_ratio', 0) if features else 0
+        cvd_slope = features.get('cvd_slope', 0) if features else 0
+        imbalance_ratio = features.get('imbalance_ratio', 0) if features else 0
+        zone_age = features.get('zone_age', 0) if features else 0
+        zone_strength = features.get('zone_strength', 0) if features else 0
+        whale_intensity = features.get('whale_intensity', 0) if features else 0
+        features_json = json.dumps(features) if features else None
+
+        cursor.execute("""
+            INSERT INTO signals
+            (timestamp, symbol, exchange, direction, setup_type, entry, sl, tp, rr, zone_price, confidence, status,
+             delta, delta_pct, volume_ratio, cvd_slope, imbalance_ratio, zone_age, zone_strength, whale_intensity, features_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            datetime.now().isoformat(),
+            symbol,
+            exchange,
+            direction,
+            setup_type,
+            entry,
+            sl,
+            tp,
+            rr,
+            zone_price,
+            confidence,
+            delta,
+            delta_pct,
+            volume_ratio,
+            cvd_slope,
+            imbalance_ratio,
+            zone_age,
+            zone_strength,
+            whale_intensity,
+            features_json
+        ))
+
+        signal_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+
+        print(f"Signal saved: {direction} {symbol} @ {entry} (ID: {signal_id})")
+        return signal_id
+    except Exception as e:
+        print(f"Error saving signal: {e}")
+        return None
+
+
+def get_signals(limit=50, status=None):
+    """Get recent signals from the database."""
+    try:
+        conn = sqlite3.connect(STATUS_DB_PATH)
+        cursor = conn.cursor()
+
+        if status:
+            cursor.execute("""
+                SELECT * FROM signals WHERE status = ? ORDER BY id DESC LIMIT ?
+            """, (status, limit))
+        else:
+            cursor.execute("""
+                SELECT * FROM signals ORDER BY id DESC LIMIT ?
+            """, (limit,))
+
+        rows = cursor.fetchall()
+        conn.close()
+
+        columns = ['id', 'timestamp', 'symbol', 'exchange', 'direction', 'setup_type',
+                   'entry', 'sl', 'tp', 'rr', 'zone_price', 'confidence', 'status',
+                   'closed_at', 'pnl_percent']
+
+        return [dict(zip(columns, row)) for row in rows]
+    except Exception as e:
+        print(f"Error getting signals: {e}")
+        return []
+
 
 def get_status():
     """Get current ML service status."""
@@ -518,9 +638,11 @@ class MLAPIHandler(BaseHTTPRequestHandler):
             content_length = int(self.headers['Content-Length'])
             body = self.rfile.read(content_length)
             data = json.loads(body)
-            
+
             candles = data.get('candles', [])
-            result = predict_raw_candles(candles)
+            symbol = data.get('symbol', 'BTCUSDT')
+            exchange = data.get('exchange', 'binance')
+            result = predict_raw_candles(candles, symbol, exchange)
 
             # predict_raw_candles returns tuple (dict, status_code)
             if isinstance(result, tuple):
