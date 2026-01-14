@@ -493,32 +493,93 @@ def save_signal(symbol, exchange, direction, setup_type, entry, sl, tp, rr, zone
         return None
 
 
-def get_signals(limit=50, status=None):
-    """Get recent signals from the database."""
+def get_signals(limit=50, direction=None, status=None):
+    """Get recent signals from the database with all details."""
     try:
         conn = sqlite3.connect(STATUS_DB_PATH)
         cursor = conn.cursor()
 
-        if status:
-            cursor.execute("""
-                SELECT * FROM signals WHERE status = ? ORDER BY id DESC LIMIT ?
-            """, (status, limit))
-        else:
-            cursor.execute("""
-                SELECT * FROM signals ORDER BY id DESC LIMIT ?
-            """, (limit,))
+        query = "SELECT * FROM signals WHERE 1=1"
+        params = []
 
+        if direction:
+            query += " AND direction = ?"
+            params.append(direction)
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+
+        cursor.execute(query, params)
         rows = cursor.fetchall()
         conn.close()
 
         columns = ['id', 'timestamp', 'symbol', 'exchange', 'direction', 'setup_type',
                    'entry', 'sl', 'tp', 'rr', 'zone_price', 'confidence', 'status',
-                   'closed_at', 'pnl_percent']
+                   'closed_at', 'pnl_percent',
+                   'delta', 'delta_pct', 'volume_ratio', 'cvd_slope', 'imbalance_ratio',
+                   'zone_age', 'zone_strength', 'whale_intensity', 'features_json']
 
-        return [dict(zip(columns, row)) for row in rows]
+        signals = []
+        for row in rows:
+            signal = dict(zip(columns, row))
+            # Parse features_json if exists
+            if signal.get('features_json'):
+                try:
+                    signal['features'] = json.loads(signal['features_json'])
+                except:
+                    signal['features'] = {}
+            del signal['features_json']  # Remove raw JSON from response
+            signals.append(signal)
+
+        return signals
     except Exception as e:
         print(f"Error getting signals: {e}")
         return []
+
+
+def get_signal_stats():
+    """Get signal statistics summary."""
+    try:
+        conn = sqlite3.connect(STATUS_DB_PATH)
+        cursor = conn.cursor()
+
+        # Total counts by direction
+        cursor.execute("""
+            SELECT
+                direction,
+                COUNT(*) as total,
+                SUM(CASE WHEN status = 'WIN' THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN status = 'LOSS' THEN 1 ELSE 0 END) as losses,
+                SUM(CASE WHEN status = 'ACTIVE' THEN 1 ELSE 0 END) as active,
+                AVG(confidence) as avg_confidence,
+                AVG(rr) as avg_rr
+            FROM signals
+            GROUP BY direction
+        """)
+        rows = cursor.fetchall()
+        conn.close()
+
+        stats = {'LONG': {}, 'SHORT': {}, 'total': 0}
+        for row in rows:
+            direction = row[0]
+            stats[direction] = {
+                'total': row[1],
+                'wins': row[2] or 0,
+                'losses': row[3] or 0,
+                'active': row[4] or 0,
+                'avgConfidence': row[5] or 0,
+                'avgRR': row[6] or 0,
+                'winRate': (row[2] / (row[2] + row[3]) * 100) if (row[2] and row[3] and row[2] + row[3] > 0) else 0
+            }
+            stats['total'] += row[1]
+
+        return stats
+    except Exception as e:
+        print(f"Error getting signal stats: {e}")
+        return {'LONG': {}, 'SHORT': {}, 'total': 0}
 
 
 def get_status():
@@ -610,13 +671,22 @@ class MLAPIHandler(BaseHTTPRequestHandler):
     
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
-        
+        query_params = urllib.parse.parse_qs(parsed.query)
+
         if parsed.path == '/api/ml/status':
             self.send_json(get_status())
         elif parsed.path == '/api/ml/train':
             # Trigger manual training
             success = run_training()
             self.send_json({'success': success, 'status': get_status()})
+        elif parsed.path == '/api/ml/signals':
+            # Get signals with optional filtering
+            limit = int(query_params.get('limit', [50])[0])
+            direction = query_params.get('direction', [None])[0]
+            status = query_params.get('status', [None])[0]
+            signals = get_signals(limit=limit, direction=direction, status=status)
+            stats = get_signal_stats()
+            self.send_json({'signals': signals, 'stats': stats})
         else:
             self.send_error(404, 'Not found')
     
@@ -695,6 +765,7 @@ def main():
     print("\nEndpoints:")
     print(f"  GET  /api/ml/status  - Get ML status and history")
     print(f"  GET  /api/ml/train   - Trigger manual retraining")
+    print(f"  GET  /api/ml/signals - Get signal history (?direction=LONG&limit=50)")
     print(f"  POST /api/ml/predict - Get prediction for signal")
     
     try:

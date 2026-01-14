@@ -14,6 +14,9 @@ export class MLDashboard {
 
         this.status = null;
         this.expanded = false;
+        this.signals = [];
+        this.signalStats = {};
+        this.signalFilter = 'ALL'; // ALL, LONG, SHORT
 
         this._init();
         this._startPolling();
@@ -235,6 +238,191 @@ export class MLDashboard {
             
             /* FAILSAFE HIDDEN CLASS */
             .hidden { display: none !important; }
+
+            /* Signal List Styles */
+            .ml-signals-section {
+                margin-top: 12px;
+                padding-top: 12px;
+                border-top: 1px solid rgba(255,255,255,0.1);
+            }
+
+            .ml-signals-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 8px;
+            }
+
+            .ml-signals-title {
+                font-size: 12px;
+                font-weight: 600;
+            }
+
+            .ml-signals-tabs {
+                display: flex;
+                gap: 4px;
+            }
+
+            .ml-signals-tab {
+                padding: 3px 8px;
+                font-size: 10px;
+                border: 1px solid rgba(255,255,255,0.2);
+                border-radius: 4px;
+                background: transparent;
+                color: #8899aa;
+                cursor: pointer;
+                transition: all 0.2s;
+            }
+
+            .ml-signals-tab:hover {
+                border-color: rgba(255,255,255,0.4);
+                color: #fff;
+            }
+
+            .ml-signals-tab.active {
+                background: rgba(0, 230, 118, 0.2);
+                border-color: #00e676;
+                color: #00e676;
+            }
+
+            .ml-signals-tab.active.short {
+                background: rgba(255, 82, 82, 0.2);
+                border-color: #ff5252;
+                color: #ff5252;
+            }
+
+            .ml-signals-list {
+                max-height: 300px;
+                overflow-y: auto;
+            }
+
+            .ml-signal-item {
+                padding: 8px;
+                margin-bottom: 6px;
+                background: rgba(255,255,255,0.03);
+                border-radius: 4px;
+                border-left: 3px solid #00e676;
+                cursor: pointer;
+                transition: all 0.2s;
+            }
+
+            .ml-signal-item:hover {
+                background: rgba(255,255,255,0.06);
+            }
+
+            .ml-signal-item.short {
+                border-left-color: #ff5252;
+            }
+
+            .ml-signal-row {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                font-size: 11px;
+            }
+
+            .ml-signal-direction {
+                font-weight: 700;
+                padding: 2px 6px;
+                border-radius: 3px;
+                font-size: 10px;
+            }
+
+            .ml-signal-direction.long {
+                background: rgba(0, 230, 118, 0.2);
+                color: #00e676;
+            }
+
+            .ml-signal-direction.short {
+                background: rgba(255, 82, 82, 0.2);
+                color: #ff5252;
+            }
+
+            .ml-signal-time {
+                color: #8899aa;
+                font-size: 10px;
+            }
+
+            .ml-signal-prices {
+                display: flex;
+                gap: 12px;
+                margin-top: 6px;
+                font-size: 10px;
+            }
+
+            .ml-signal-price {
+                display: flex;
+                flex-direction: column;
+            }
+
+            .ml-signal-price-label {
+                color: #8899aa;
+                font-size: 9px;
+            }
+
+            .ml-signal-price-value {
+                font-weight: 600;
+            }
+
+            .ml-signal-details {
+                display: none;
+                margin-top: 8px;
+                padding-top: 8px;
+                border-top: 1px solid rgba(255,255,255,0.1);
+            }
+
+            .ml-signal-item.expanded .ml-signal-details {
+                display: block;
+            }
+
+            .ml-signal-metrics {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 6px;
+                font-size: 10px;
+            }
+
+            .ml-signal-metric {
+                display: flex;
+                justify-content: space-between;
+            }
+
+            .ml-signal-metric-label {
+                color: #8899aa;
+            }
+
+            .ml-signal-metric-value {
+                font-weight: 600;
+            }
+
+            .ml-signal-status {
+                padding: 2px 6px;
+                border-radius: 3px;
+                font-size: 9px;
+                font-weight: 600;
+            }
+
+            .ml-signal-status.active {
+                background: rgba(255, 193, 7, 0.2);
+                color: #ffc107;
+            }
+
+            .ml-signal-status.win {
+                background: rgba(0, 230, 118, 0.2);
+                color: #00e676;
+            }
+
+            .ml-signal-status.loss {
+                background: rgba(255, 82, 82, 0.2);
+                color: #ff5252;
+            }
+
+            .ml-no-signals {
+                text-align: center;
+                color: #8899aa;
+                font-size: 11px;
+                padding: 20px;
+            }
         `;
         document.head.appendChild(style);
     }
@@ -364,7 +552,12 @@ export class MLDashboard {
             </div>
             ${historyHtml}
             <button class="ml-btn" id="mlTrainBtn">🔄 Manual Training</button>
+            ${this._renderSignalsSection()}
         `;
+
+        // Setup signal tab handlers
+        this._setupSignalTabHandlers();
+        this.fetchSignals();
 
         // Add train button handler logic
         const trainBtn = stats.querySelector('#mlTrainBtn');
@@ -487,5 +680,167 @@ export class MLDashboard {
             console.warn('Prediction error:', error);
             return { prediction: null, confidence: 0 };
         }
+    }
+
+    async fetchSignals() {
+        try {
+            const direction = this.signalFilter === 'ALL' ? '' : `?direction=${this.signalFilter}`;
+            const response = await fetch(`${this.apiUrl}/signals${direction}`);
+            if (!response.ok) throw new Error('API error');
+            const data = await response.json();
+            this.signals = data.signals || [];
+            this.signalStats = data.stats || {};
+            this._renderSignals();
+        } catch (error) {
+            console.warn('Failed to fetch signals:', error.message);
+            this.signals = [];
+        }
+    }
+
+    _renderSignals() {
+        const container = document.getElementById('mlSignalsList');
+        if (!container) return;
+
+        if (this.signals.length === 0) {
+            container.innerHTML = `
+                <div class="ml-no-signals">
+                    No signals yet.<br>
+                    <span style="font-size: 10px;">Signals appear when confidence > 60%</span>
+                </div>
+            `;
+            return;
+        }
+
+        container.innerHTML = this.signals.map(signal => {
+            const isShort = signal.direction === 'SHORT';
+            const dirClass = isShort ? 'short' : 'long';
+            const statusClass = (signal.status || 'ACTIVE').toLowerCase();
+            const time = new Date(signal.timestamp).toLocaleString('ko-KR', {
+                month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+            });
+
+            // Format prices
+            const formatPrice = (p) => p ? p.toLocaleString('en-US', { maximumFractionDigits: 2 }) : '--';
+
+            return `
+                <div class="ml-signal-item ${dirClass}" data-id="${signal.id}">
+                    <div class="ml-signal-row">
+                        <div style="display: flex; align-items: center; gap: 6px;">
+                            <span class="ml-signal-direction ${dirClass}">${signal.direction}</span>
+                            <span>${signal.symbol}</span>
+                            <span class="ml-signal-status ${statusClass}">${signal.status || 'ACTIVE'}</span>
+                        </div>
+                        <span class="ml-signal-time">${time}</span>
+                    </div>
+                    <div class="ml-signal-prices">
+                        <div class="ml-signal-price">
+                            <span class="ml-signal-price-label">Entry</span>
+                            <span class="ml-signal-price-value">${formatPrice(signal.entry)}</span>
+                        </div>
+                        <div class="ml-signal-price">
+                            <span class="ml-signal-price-label">SL</span>
+                            <span class="ml-signal-price-value" style="color: #ff5252;">${formatPrice(signal.sl)}</span>
+                        </div>
+                        <div class="ml-signal-price">
+                            <span class="ml-signal-price-label">TP</span>
+                            <span class="ml-signal-price-value" style="color: #00e676;">${formatPrice(signal.tp)}</span>
+                        </div>
+                        <div class="ml-signal-price">
+                            <span class="ml-signal-price-label">RR</span>
+                            <span class="ml-signal-price-value">1:${signal.rr?.toFixed(1) || '--'}</span>
+                        </div>
+                        <div class="ml-signal-price">
+                            <span class="ml-signal-price-label">Conf</span>
+                            <span class="ml-signal-price-value">${(signal.confidence * 100).toFixed(0)}%</span>
+                        </div>
+                    </div>
+                    <div class="ml-signal-details">
+                        <div class="ml-signal-metrics">
+                            <div class="ml-signal-metric">
+                                <span class="ml-signal-metric-label">Setup</span>
+                                <span class="ml-signal-metric-value">${signal.setup_type || '--'}</span>
+                            </div>
+                            <div class="ml-signal-metric">
+                                <span class="ml-signal-metric-label">Exchange</span>
+                                <span class="ml-signal-metric-value">${signal.exchange || '--'}</span>
+                            </div>
+                            <div class="ml-signal-metric">
+                                <span class="ml-signal-metric-label">Zone Strength</span>
+                                <span class="ml-signal-metric-value">${signal.zone_strength?.toFixed(1) || '--'}</span>
+                            </div>
+                            <div class="ml-signal-metric">
+                                <span class="ml-signal-metric-label">Zone Age</span>
+                                <span class="ml-signal-metric-value">${signal.zone_age || '--'}</span>
+                            </div>
+                            <div class="ml-signal-metric">
+                                <span class="ml-signal-metric-label">Delta</span>
+                                <span class="ml-signal-metric-value">${signal.delta?.toFixed(0) || '--'}</span>
+                            </div>
+                            <div class="ml-signal-metric">
+                                <span class="ml-signal-metric-label">Delta %</span>
+                                <span class="ml-signal-metric-value">${signal.delta_pct?.toFixed(2) || '--'}%</span>
+                            </div>
+                            <div class="ml-signal-metric">
+                                <span class="ml-signal-metric-label">Volume Ratio</span>
+                                <span class="ml-signal-metric-value">${signal.volume_ratio?.toFixed(2) || '--'}</span>
+                            </div>
+                            <div class="ml-signal-metric">
+                                <span class="ml-signal-metric-label">Whale Intensity</span>
+                                <span class="ml-signal-metric-value">${signal.whale_intensity?.toFixed(2) || '--'}</span>
+                            </div>
+                            <div class="ml-signal-metric">
+                                <span class="ml-signal-metric-label">Imbalance Ratio</span>
+                                <span class="ml-signal-metric-value">${signal.imbalance_ratio?.toFixed(2) || '--'}</span>
+                            </div>
+                            <div class="ml-signal-metric">
+                                <span class="ml-signal-metric-label">CVD Slope</span>
+                                <span class="ml-signal-metric-value">${signal.cvd_slope?.toFixed(2) || '--'}</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        // Add click handlers for expanding
+        container.querySelectorAll('.ml-signal-item').forEach(item => {
+            item.addEventListener('click', () => {
+                item.classList.toggle('expanded');
+            });
+        });
+    }
+
+    _renderSignalsSection() {
+        return `
+            <div class="ml-signals-section">
+                <div class="ml-signals-header">
+                    <span class="ml-signals-title">📋 Signal History</span>
+                    <div class="ml-signals-tabs">
+                        <button class="ml-signals-tab ${this.signalFilter === 'ALL' ? 'active' : ''}" data-filter="ALL">All</button>
+                        <button class="ml-signals-tab ${this.signalFilter === 'LONG' ? 'active' : ''}" data-filter="LONG">Long</button>
+                        <button class="ml-signals-tab ${this.signalFilter === 'SHORT' ? 'active short' : ''}" data-filter="SHORT">Short</button>
+                    </div>
+                </div>
+                <div class="ml-signals-list" id="mlSignalsList">
+                    <div class="ml-no-signals">Loading...</div>
+                </div>
+            </div>
+        `;
+    }
+
+    _setupSignalTabHandlers() {
+        const tabs = this.container.querySelectorAll('.ml-signals-tab');
+        tabs.forEach(tab => {
+            tab.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.signalFilter = tab.dataset.filter;
+                // Update active state
+                tabs.forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                if (this.signalFilter === 'SHORT') tab.classList.add('short');
+                // Fetch with new filter
+                this.fetchSignals();
+            });
+        });
     }
 }
