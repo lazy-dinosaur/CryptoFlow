@@ -108,7 +108,10 @@ function processTrade(fullSymbol, trade, baseSymbol = null) {
         { name: '1m', minutes: 1, table: 'candles_1' },
         { name: '5m', minutes: 5, table: 'candles_5' },
         { name: '15m', minutes: 15, table: 'candles_15' },
-        { name: '1h', minutes: 60, table: 'candles_60' }
+        { name: '30m', minutes: 30, table: 'candles_30' },
+        { name: '1h', minutes: 60, table: 'candles_60' },
+        { name: '4h', minutes: 240, table: 'candles_240' },
+        { name: '1d', minutes: 1440, table: 'candles_1440' }
     ];
 
     for (const tf of timeframes) {
@@ -192,7 +195,10 @@ function saveAllCandles(symbol) {
         { name: '1m', table: 'candles_1' },
         { name: '5m', table: 'candles_5' },
         { name: '15m', table: 'candles_15' },
-        { name: '1h', table: 'candles_60' }
+        { name: '30m', table: 'candles_30' },
+        { name: '1h', table: 'candles_60' },
+        { name: '4h', table: 'candles_240' },
+        { name: '1d', table: 'candles_1440' }
     ];
 
     for (const tf of timeframes) {
