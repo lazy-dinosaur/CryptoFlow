@@ -272,7 +272,7 @@ export class MLDashboard {
         badge.className = `ml-badge ${accuracyClass === 'bad' ? 'error' : (accuracyClass === 'neutral' ? 'warning' : '')}`;
 
         const lastTraining = this.status.lastTraining
-            ? new Date(this.status.lastTraining).toLocaleString('en-US', {
+            ? new Date(this.status.lastTraining).toLocaleString('ko-KR', {
                 month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
             })
             : '--';
@@ -284,7 +284,7 @@ export class MLDashboard {
                     <div class="ml-history-title">Training History</div>
                     ${this.status.history.slice(0, 5).map(h => `
                         <div class="ml-history-item">
-                            <span>${new Date(h.timestamp).toLocaleString('en-US', {
+                            <span>${new Date(h.timestamp).toLocaleString('ko-KR', {
                 month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
             })}</span>
                             <span>${(h.accuracy * 100).toFixed(1)}% (${h.samples} samples)</span>
