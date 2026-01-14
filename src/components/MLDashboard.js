@@ -174,7 +174,22 @@ export class MLDashboard {
             .ml-stat-value.neutral {
                 color: #ffd700;
             }
-            
+
+            .ml-stat-section {
+                margin: 8px 0;
+                padding: 8px;
+                background: rgba(255,255,255,0.03);
+                border-radius: 4px;
+            }
+
+            .ml-stat-header {
+                font-size: 11px;
+                font-weight: bold;
+                margin-bottom: 6px;
+                padding-bottom: 4px;
+                border-bottom: 1px solid rgba(255,255,255,0.1);
+            }
+
             .ml-history {
                 margin-top: 10px;
                 padding-top: 10px;
@@ -294,14 +309,48 @@ export class MLDashboard {
             `;
         }
 
+        // LONG/SHORT stats
+        const longSamples = this.status.longSamples || 0;
+        const shortSamples = this.status.shortSamples || 0;
+        const longAcc = (this.status.longAccuracy || 0).toFixed(1);
+        const shortAcc = (this.status.shortAccuracy || 0).toFixed(1);
+        const longWR = (this.status.longWinrate || 0).toFixed(1);
+        const shortWR = (this.status.shortWinrate || 0).toFixed(1);
+
         stats.innerHTML = `
             <div class="ml-stat-row">
-                <span class="ml-stat-label">Model Accuracy</span>
+                <span class="ml-stat-label">Total Accuracy</span>
                 <span class="ml-stat-value ${accuracyClass}">${accuracy}%</span>
             </div>
-            <div class="ml-stat-row">
-                <span class="ml-stat-label">Training Samples</span>
-                <span class="ml-stat-value">${this.status.sampleCount || '--'}</span>
+            <div class="ml-stat-section">
+                <div class="ml-stat-header">📈 LONG</div>
+                <div class="ml-stat-row">
+                    <span class="ml-stat-label">Accuracy</span>
+                    <span class="ml-stat-value" style="color: #00e676;">${longAcc}%</span>
+                </div>
+                <div class="ml-stat-row">
+                    <span class="ml-stat-label">Win Rate</span>
+                    <span class="ml-stat-value">${longWR}%</span>
+                </div>
+                <div class="ml-stat-row">
+                    <span class="ml-stat-label">Samples</span>
+                    <span class="ml-stat-value">${longSamples}</span>
+                </div>
+            </div>
+            <div class="ml-stat-section">
+                <div class="ml-stat-header">📉 SHORT</div>
+                <div class="ml-stat-row">
+                    <span class="ml-stat-label">Accuracy</span>
+                    <span class="ml-stat-value" style="color: #ff5252;">${shortAcc}%</span>
+                </div>
+                <div class="ml-stat-row">
+                    <span class="ml-stat-label">Win Rate</span>
+                    <span class="ml-stat-value">${shortWR}%</span>
+                </div>
+                <div class="ml-stat-row">
+                    <span class="ml-stat-label">Samples</span>
+                    <span class="ml-stat-value">${shortSamples}</span>
+                </div>
             </div>
             <div class="ml-stat-row">
                 <span class="ml-stat-label">Last Training</span>

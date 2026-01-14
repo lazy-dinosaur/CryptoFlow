@@ -49,7 +49,13 @@ def init_status_db():
             sample_count INTEGER,
             accuracy REAL,
             win_rate REAL,
-            top_features TEXT
+            top_features TEXT,
+            long_samples INTEGER DEFAULT 0,
+            short_samples INTEGER DEFAULT 0,
+            long_accuracy REAL DEFAULT 0,
+            short_accuracy REAL DEFAULT 0,
+            long_winrate REAL DEFAULT 0,
+            short_winrate REAL DEFAULT 0
         )
     """)
     
@@ -318,41 +324,44 @@ def run_training():
             return False
         
         # Generate training data
-        X, y = generate_training_data(df)
-        
+        X, y, data_stats = generate_training_data(df)
+
         if len(X) < 20:
             print("Not enough training samples")
             return False
-        
+
         # Train model
-        trained_model = train_model(X, y)
-        
+        trained_model, model_stats = train_model(X, y)
+
         if trained_model is None:
             return False
-        
+
         # Save model
         save_model(trained_model, X.columns, MODEL_PATH)
-        
+
         # Update global state
         model = trained_model
         feature_columns = X.columns.tolist()
         last_training = datetime.now().isoformat()
-        
-        # Calculate stats
-        from sklearn.model_selection import train_test_split
-        from sklearn.metrics import accuracy_score
-        
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-        y_pred = trained_model.predict(X_test)
-        accuracy = accuracy_score(y_test, y_pred)
-        
-        last_accuracy = float(accuracy)
+
+        last_accuracy = model_stats['accuracy'] / 100
         last_sample_count = len(X)
-        
-        # Save to history
-        save_training_record(len(X), accuracy, sum(y)/len(y), X.columns.tolist()[:5])
-        
-        print(f"Training complete! Accuracy: {accuracy*100:.1f}%")
+
+        # Save to history with LONG/SHORT stats
+        save_training_record(
+            sample_count=len(X),
+            accuracy=model_stats['accuracy'] / 100,
+            win_rate=data_stats['total_winrate'] / 100,
+            top_features=X.columns.tolist()[:5],
+            long_samples=data_stats['long_samples'],
+            short_samples=data_stats['short_samples'],
+            long_accuracy=model_stats['long_accuracy'],
+            short_accuracy=model_stats['short_accuracy'],
+            long_winrate=data_stats['long_winrate'],
+            short_winrate=data_stats['short_winrate']
+        )
+
+        print(f"Training complete! Accuracy: {model_stats['accuracy']:.1f}%")
         return True
         
     except Exception as e:
@@ -361,62 +370,94 @@ def run_training():
         traceback.print_exc()
         return False
 
-def save_training_record(sample_count, accuracy, win_rate, top_features):
+def save_training_record(sample_count, accuracy, win_rate, top_features,
+                         long_samples=0, short_samples=0,
+                         long_accuracy=0, short_accuracy=0,
+                         long_winrate=0, short_winrate=0):
     """Save training record to database."""
     conn = sqlite3.connect(STATUS_DB_PATH)
     cursor = conn.cursor()
-    
+
     cursor.execute("""
-        INSERT INTO training_history (timestamp, sample_count, accuracy, win_rate, top_features)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO training_history
+        (timestamp, sample_count, accuracy, win_rate, top_features,
+         long_samples, short_samples, long_accuracy, short_accuracy,
+         long_winrate, short_winrate)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         datetime.now().isoformat(),
         sample_count,
         accuracy,
         win_rate,
-        json.dumps(top_features)
+        json.dumps(top_features),
+        long_samples,
+        short_samples,
+        long_accuracy,
+        short_accuracy,
+        long_winrate,
+        short_winrate
     ))
-    
+
     conn.commit()
     conn.close()
 
 def get_status():
     """Get current ML service status."""
     global last_training, last_accuracy, last_sample_count
-    
+
     # Get training history from DB
     history = []
+    latest_stats = {}
     try:
         conn = sqlite3.connect(STATUS_DB_PATH)
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT timestamp, sample_count, accuracy, win_rate 
-            FROM training_history 
-            ORDER BY id DESC 
+            SELECT timestamp, sample_count, accuracy, win_rate,
+                   long_samples, short_samples, long_accuracy, short_accuracy,
+                   long_winrate, short_winrate
+            FROM training_history
+            ORDER BY id DESC
             LIMIT 10
         """)
         rows = cursor.fetchall()
         conn.close()
-        
-        history = [
-            {
+
+        for i, row in enumerate(rows):
+            entry = {
                 'timestamp': row[0],
                 'samples': row[1],
                 'accuracy': row[2],
-                'winRate': row[3]
+                'winRate': row[3],
+                'longSamples': row[4] or 0,
+                'shortSamples': row[5] or 0,
+                'longAccuracy': row[6] or 0,
+                'shortAccuracy': row[7] or 0,
+                'longWinrate': row[8] or 0,
+                'shortWinrate': row[9] or 0
             }
-            for row in rows
-        ]
+            history.append(entry)
+
+            # Get latest stats from most recent entry
+            if i == 0:
+                latest_stats = {
+                    'longSamples': entry['longSamples'],
+                    'shortSamples': entry['shortSamples'],
+                    'longAccuracy': entry['longAccuracy'],
+                    'shortAccuracy': entry['shortAccuracy'],
+                    'longWinrate': entry['longWinrate'],
+                    'shortWinrate': entry['shortWinrate']
+                }
     except Exception as e:
         print(f"Error getting history: {e}")
-    
+
     return {
         'modelLoaded': model is not None,
         'lastTraining': last_training,
         'accuracy': last_accuracy,
         'sampleCount': last_sample_count,
         'nextTraining': calculate_next_training(),
-        'history': history
+        'history': history,
+        **latest_stats
     }
 
 def calculate_next_training():

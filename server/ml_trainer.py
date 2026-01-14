@@ -510,23 +510,54 @@ def generate_training_data(df, depth_data=None, whale_trades=None):
                                 y.append(1 if result == 'win' else 0)
                                 short_count += 1
 
-    print(f"Generated {len(X)} training samples (LONG: {long_count}, SHORT: {short_count})")
-    print(f"Win rate: {sum(y)/len(y)*100:.1f}%" if y else "No samples")
+    # Calculate separate win rates
+    long_wins = 0
+    long_total = 0
+    short_wins = 0
+    short_total = 0
 
-    return pd.DataFrame(X), np.array(y)
+    for i, features in enumerate(X):
+        if features.get('is_short', 0) == 1:
+            short_total += 1
+            if y[i] == 1:
+                short_wins += 1
+        else:
+            long_total += 1
+            if y[i] == 1:
+                long_wins += 1
+
+    long_winrate = (long_wins / long_total * 100) if long_total > 0 else 0
+    short_winrate = (short_wins / short_total * 100) if short_total > 0 else 0
+    total_winrate = (sum(y) / len(y) * 100) if y else 0
+
+    print(f"Generated {len(X)} training samples (LONG: {long_count}, SHORT: {short_count})")
+    print(f"Win rates - Total: {total_winrate:.1f}% | LONG: {long_winrate:.1f}% | SHORT: {short_winrate:.1f}%")
+
+    stats = {
+        'total_samples': len(X),
+        'long_samples': long_total,
+        'short_samples': short_total,
+        'long_wins': long_wins,
+        'short_wins': short_wins,
+        'long_winrate': long_winrate,
+        'short_winrate': short_winrate,
+        'total_winrate': total_winrate
+    }
+
+    return pd.DataFrame(X), np.array(y), stats
 
 def train_model(X, y):
     """Train XGBoost classifier."""
     if len(X) < 20:
         print("Not enough training samples!")
-        return None
-    
+        return None, None
+
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42
     )
-    
+
     print(f"\nTraining on {len(X_train)} samples, testing on {len(X_test)}")
-    
+
     # Train XGBoost
     model = xgb.XGBClassifier(
         n_estimators=100,
@@ -536,28 +567,60 @@ def train_model(X, y):
         eval_metric='logloss',
         random_state=42
     )
-    
+
     model.fit(X_train, y_train)
-    
+
     # Evaluate
     y_pred = model.predict(X_test)
     accuracy = accuracy_score(y_test, y_pred)
-    
+
+    # Calculate LONG/SHORT accuracy separately
+    long_correct = 0
+    long_total = 0
+    short_correct = 0
+    short_total = 0
+
+    for i in range(len(X_test)):
+        is_short = X_test.iloc[i].get('is_short', 0) == 1
+        correct = y_pred[i] == y_test.iloc[i] if hasattr(y_test, 'iloc') else y_pred[i] == y_test[i]
+
+        if is_short:
+            short_total += 1
+            if correct:
+                short_correct += 1
+        else:
+            long_total += 1
+            if correct:
+                long_correct += 1
+
+    long_accuracy = (long_correct / long_total * 100) if long_total > 0 else 0
+    short_accuracy = (short_correct / short_total * 100) if short_total > 0 else 0
+
     print(f"\nModel Accuracy: {accuracy*100:.1f}%")
+    print(f"  LONG Accuracy: {long_accuracy:.1f}% ({long_correct}/{long_total})")
+    print(f"  SHORT Accuracy: {short_accuracy:.1f}% ({short_correct}/{short_total})")
     print("\nClassification Report:")
     print(classification_report(y_test, y_pred, target_names=['Loss', 'Win']))
-    
+
     # Feature importance
     print("\nTop 10 Feature Importances:")
     importance = pd.DataFrame({
         'feature': X.columns,
         'importance': model.feature_importances_
     }).sort_values('importance', ascending=False)
-    
+
     for i, row in importance.head(10).iterrows():
         print(f"  {row['feature']}: {row['importance']:.4f}")
-    
-    return model
+
+    model_stats = {
+        'accuracy': accuracy * 100,
+        'long_accuracy': long_accuracy,
+        'short_accuracy': short_accuracy,
+        'long_test_count': long_total,
+        'short_test_count': short_total
+    }
+
+    return model, model_stats
 
 def save_model(model, feature_columns, path):
     """Save trained model and feature info."""
@@ -587,14 +650,14 @@ def main():
     whale_trades = load_whale_trades(DB_PATH, 'btcusdt', threshold=5.0)
     
     # Generate training data with all features
-    X, y = generate_training_data(df, depth_data, whale_trades)
-    
+    X, y, data_stats = generate_training_data(df, depth_data, whale_trades)
+
     if len(X) == 0:
         print("No training samples generated!")
         return
-    
+
     # Train model
-    model = train_model(X, y)
+    model, model_stats = train_model(X, y)
     
     if model:
         save_model(model, X.columns, MODEL_PATH)
