@@ -40,7 +40,7 @@ function initSchema() {
     `);
 
     // Pre-aggregated candles for different timeframes
-    const timeframes = ['1', '5', '15', '60'];
+    const timeframes = ['1', '5', '15', '30', '60', '240', '1440'];
 
     for (const tf of timeframes) {
         db.exec(`
