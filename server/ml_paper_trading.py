@@ -632,7 +632,7 @@ class MLPaperTradingService:
             for trade in trades_to_remove:
                 state.active_trades.remove(trade)
 
-    def _find_swing_points(self, candles: pd.DataFrame, confirm_candles: int = 3):
+    def _find_swing_points(self, candles: pd.DataFrame, confirm_candles: int = 2):
         """Find swing highs and lows."""
         if len(candles) < confirm_candles + 1:
             return [], []
@@ -716,8 +716,8 @@ class MLPaperTradingService:
                 if current_close < sl['price'] * 0.98 or current_close > sh['price'] * 1.02:
                     continue
 
-                # Use 0.6% tolerance for touches (relaxed from 0.4% due to limited data)
-                touch_tolerance = 0.006
+                # Use 0.4% tolerance for touches (matches ML training)
+                touch_tolerance = 0.004
                 support_touches = sum(1 for s in swing_lows if abs(s['price'] - sl['price']) / sl['price'] < touch_tolerance)
                 resistance_touches = sum(1 for s in swing_highs if abs(s['price'] - sh['price']) / sh['price'] < touch_tolerance)
 
@@ -803,6 +803,15 @@ class MLPaperTradingService:
             return
 
         # Update channel
+        current_price = df_1h['close'].iloc[-1]
+
+        # Invalidate old channel if price moved too far (>3% away)
+        if hasattr(self, 'current_channel') and self.current_channel:
+            ch = self.current_channel
+            if current_price < ch.support * 0.97 or current_price > ch.resistance * 1.03:
+                print(f"[CHANNEL] Price {current_price:.0f} out of range, invalidating old channel {ch.support:.0f}-{ch.resistance:.0f}")
+                self.current_channel = None
+
         channel = self._update_channel(df_1h)
         if channel:
             self.current_channel = channel
