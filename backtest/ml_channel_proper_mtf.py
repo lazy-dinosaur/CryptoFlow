@@ -157,8 +157,13 @@ def build_htf_channels(htf_candles: pd.DataFrame,
                 break
 
         # Create new channel from H-L pair
+        # Get swing points confirmed by current index (3 candles after peak)
+        # A swing point at idx is confirmed at idx+3, so we can only use it at i if idx+3 <= i
+        valid_swing_lows = [sl for sl in swing_lows if sl.idx + 3 <= i]
+        valid_swing_highs = [sh for sh in swing_highs if sh.idx + 3 <= i]
+
         if new_high:
-            for sl in swing_lows[-30:]:
+            for sl in valid_swing_lows[-30:]:
                 if sl.idx < new_high.idx - 100:
                     continue
                 if new_high.price > sl.price:
@@ -176,7 +181,7 @@ def build_htf_channels(htf_candles: pd.DataFrame,
                             )
 
         if new_low:
-            for sh in swing_highs[-30:]:
+            for sh in valid_swing_highs[-30:]:
                 if sh.idx < new_low.idx - 100:
                     continue
                 if sh.price > new_low.price:

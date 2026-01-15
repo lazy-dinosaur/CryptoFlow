@@ -65,6 +65,24 @@ module.exports = {
             error_file: './logs/ml-error.log',
             out_file: './logs/ml-out.log',
             merge_logs: true
+        },
+        {
+            // ML Paper Trading - 3 strategies comparison
+            name: 'ml-paper',
+            script: 'ml_paper_trading.py',
+            cwd: './server',
+            interpreter: 'python3',
+            instances: 1,
+            autorestart: true,
+            watch: false,
+            max_memory_restart: '500M',
+            env: {
+                NODE_ENV: 'production'
+            },
+            log_date_format: 'YYYY-MM-DD HH:mm:ss',
+            error_file: './logs/ml-paper-error.log',
+            out_file: './logs/ml-paper-out.log',
+            merge_logs: true
         }
     ]
 };

@@ -1,0 +1,1023 @@
+#!/usr/bin/env python3
+"""
+ML Paper Trading Service - 3 Strategy Comparison
+
+실시간으로 3가지 전략 비교:
+1. No ML: 모든 신호 진입
+2. ML Entry Only: Entry 필터링 (threshold=0.7)
+3. ML Combined: Entry 필터링 + Dynamic Exit
+
+실행: python ml_paper_trading.py
+SSH에서 백그라운드: nohup python ml_paper_trading.py > paper_trading.log 2>&1 &
+"""
+
+import sqlite3
+import json
+import numpy as np
+import pandas as pd
+import joblib
+from datetime import datetime, timedelta
+from dataclasses import dataclass, asdict, field
+from typing import List, Dict, Optional, Tuple
+import os
+import time
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import urllib.parse
+
+# Paths
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(SCRIPT_DIR, 'data', 'cryptoflow.db')
+PAPER_DB_PATH = os.path.join(SCRIPT_DIR, 'data', 'ml_paper_trading.db')
+MODELS_DIR = os.path.join(SCRIPT_DIR, '..', 'backtest', 'models')
+
+# Configuration
+SYMBOL = "BTCUSDT"
+HTF = "1h"
+LTF = "15m"
+SERVICE_PORT = 5003
+
+# Strategy parameters
+TOUCH_THRESHOLD = 0.003
+SL_BUFFER_PCT = 0.002
+ENTRY_THRESHOLD = 0.7
+
+# Paper trading parameters
+INITIAL_CAPITAL = 10000.0
+RISK_PCT = 0.015
+MAX_LEVERAGE = 15
+FEE_PCT = 0.0004
+
+# Labels
+EXIT_AT_TP1 = 0
+HOLD_FOR_TP2 = 1
+
+
+@dataclass
+class Channel:
+    support: float
+    resistance: float
+    support_touches: int
+    resistance_touches: int
+    lowest_low: float
+    highest_high: float
+    confirmed: bool
+
+
+@dataclass
+class Signal:
+    timestamp: str
+    direction: str  # LONG or SHORT
+    setup_type: str  # BOUNCE or FAKEOUT
+    entry_price: float
+    sl_price: float
+    tp1_price: float
+    tp2_price: float
+    channel_support: float
+    channel_resistance: float
+    entry_prob: float = 0.0  # ML Entry probability
+
+
+@dataclass
+class Trade:
+    signal_id: int
+    strategy: str  # NO_ML, ML_ENTRY, ML_COMBINED
+    timestamp: str
+    direction: str
+    setup_type: str
+    entry_price: float
+    sl_price: float
+    tp1_price: float
+    tp2_price: float
+    status: str = 'ACTIVE'  # ACTIVE, TP1_HIT, TP2_HIT, SL_HIT, BE_HIT
+    exit_decision: str = ''  # EXIT or HOLD (for ML_COMBINED)
+    pnl_pct: float = 0.0
+    closed_at: str = ''
+    db_id: int = 0
+
+
+@dataclass
+class StrategyState:
+    name: str
+    capital: float = INITIAL_CAPITAL
+    peak_capital: float = INITIAL_CAPITAL
+    total_trades: int = 0
+    wins: int = 0
+    losses: int = 0
+    total_pnl: float = 0.0
+    max_drawdown: float = 0.0
+    active_trades: List[Trade] = field(default_factory=list)
+
+
+class MLPaperTradingService:
+    def __init__(self):
+        self.running = False
+        self.channels: Dict[int, Channel] = {}
+        self.pending_fakeouts: Dict[int, dict] = {}
+
+        # 3 strategies
+        self.strategies = {
+            'NO_ML': StrategyState(name='No ML (All Signals)'),
+            'ML_ENTRY': StrategyState(name='ML Entry Only (0.7)'),
+            'ML_COMBINED': StrategyState(name='ML Entry + Dynamic Exit')
+        }
+
+        # Load ML models
+        self.entry_model = None
+        self.entry_scaler = None
+        self.exit_model = None
+        self.exit_scaler = None
+        self._load_models()
+
+        # Initialize database
+        self._init_db()
+
+        # Signal counter
+        self.signal_counter = 0
+
+    def _load_models(self):
+        """Load trained ML models."""
+        try:
+            self.entry_model = joblib.load(os.path.join(MODELS_DIR, 'entry_model.joblib'))
+            self.entry_scaler = joblib.load(os.path.join(MODELS_DIR, 'entry_scaler.joblib'))
+            self.exit_model = joblib.load(os.path.join(MODELS_DIR, 'exit_model.joblib'))
+            self.exit_scaler = joblib.load(os.path.join(MODELS_DIR, 'exit_scaler.joblib'))
+            print(f"[ML] Models loaded from {MODELS_DIR}")
+        except Exception as e:
+            print(f"[ML] Failed to load models: {e}")
+            print("[ML] Running without ML models (NO_ML only)")
+
+    def _init_db(self):
+        """Initialize SQLite database for paper trading."""
+        os.makedirs(os.path.dirname(PAPER_DB_PATH), exist_ok=True)
+
+        conn = sqlite3.connect(PAPER_DB_PATH)
+        c = conn.cursor()
+
+        # Signals table
+        c.execute('''CREATE TABLE IF NOT EXISTS signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            direction TEXT,
+            setup_type TEXT,
+            entry_price REAL,
+            sl_price REAL,
+            tp1_price REAL,
+            tp2_price REAL,
+            channel_support REAL,
+            channel_resistance REAL,
+            entry_prob REAL
+        )''')
+
+        # Trades table
+        c.execute('''CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            signal_id INTEGER,
+            strategy TEXT,
+            timestamp TEXT,
+            direction TEXT,
+            setup_type TEXT,
+            entry_price REAL,
+            sl_price REAL,
+            tp1_price REAL,
+            tp2_price REAL,
+            status TEXT,
+            exit_decision TEXT,
+            pnl_pct REAL,
+            closed_at TEXT,
+            FOREIGN KEY (signal_id) REFERENCES signals(id)
+        )''')
+
+        # Strategy states table
+        c.execute('''CREATE TABLE IF NOT EXISTS strategy_states (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            strategy TEXT,
+            capital REAL,
+            peak_capital REAL,
+            total_trades INTEGER,
+            wins INTEGER,
+            losses INTEGER,
+            total_pnl REAL,
+            max_drawdown REAL
+        )''')
+
+        conn.commit()
+        conn.close()
+        print(f"[DB] Initialized: {PAPER_DB_PATH}")
+
+    def _save_signal(self, signal: Signal) -> int:
+        """Save signal to database and return ID."""
+        conn = sqlite3.connect(PAPER_DB_PATH)
+        c = conn.cursor()
+        c.execute('''INSERT INTO signals
+            (timestamp, direction, setup_type, entry_price, sl_price, tp1_price, tp2_price,
+             channel_support, channel_resistance, entry_prob)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (signal.timestamp, signal.direction, signal.setup_type, signal.entry_price,
+             signal.sl_price, signal.tp1_price, signal.tp2_price,
+             signal.channel_support, signal.channel_resistance, signal.entry_prob))
+        signal_id = c.lastrowid
+        conn.commit()
+        conn.close()
+        return signal_id
+
+    def _save_trade(self, trade: Trade) -> int:
+        """Save trade to database."""
+        conn = sqlite3.connect(PAPER_DB_PATH)
+        c = conn.cursor()
+        c.execute('''INSERT INTO trades
+            (signal_id, strategy, timestamp, direction, setup_type, entry_price, sl_price,
+             tp1_price, tp2_price, status, exit_decision, pnl_pct, closed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (trade.signal_id, trade.strategy, trade.timestamp, trade.direction,
+             trade.setup_type, trade.entry_price, trade.sl_price, trade.tp1_price,
+             trade.tp2_price, trade.status, trade.exit_decision, trade.pnl_pct, trade.closed_at))
+        trade_id = c.lastrowid
+        conn.commit()
+        conn.close()
+        return trade_id
+
+    def _update_trade(self, trade: Trade):
+        """Update trade in database."""
+        conn = sqlite3.connect(PAPER_DB_PATH)
+        c = conn.cursor()
+        c.execute('''UPDATE trades SET status=?, exit_decision=?, pnl_pct=?, closed_at=?
+            WHERE id=?''',
+            (trade.status, trade.exit_decision, trade.pnl_pct, trade.closed_at, trade.db_id))
+        conn.commit()
+        conn.close()
+
+    def _save_strategy_state(self, strategy: str, state: StrategyState):
+        """Save strategy state snapshot."""
+        conn = sqlite3.connect(PAPER_DB_PATH)
+        c = conn.cursor()
+        c.execute('''INSERT INTO strategy_states
+            (timestamp, strategy, capital, peak_capital, total_trades, wins, losses, total_pnl, max_drawdown)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (datetime.now().isoformat(), strategy, state.capital, state.peak_capital,
+             state.total_trades, state.wins, state.losses, state.total_pnl, state.max_drawdown))
+        conn.commit()
+        conn.close()
+
+    def _load_candles(self, timeframe: str, limit: int = 500) -> pd.DataFrame:
+        """Load candles from database."""
+        conn = sqlite3.connect(DB_PATH)
+        query = f'''
+            SELECT time, open, high, low, close, volume, delta
+            FROM candles_{timeframe}
+            WHERE symbol = ?
+            ORDER BY time DESC
+            LIMIT ?
+        '''
+        df = pd.read_sql_query(query, conn, params=(SYMBOL, limit))
+        conn.close()
+
+        if len(df) == 0:
+            return pd.DataFrame()
+
+        df['time'] = pd.to_datetime(df['time'])
+        df = df.sort_values('time').reset_index(drop=True)
+        return df
+
+    def _extract_entry_features(self, df_15m: pd.DataFrame, idx: int, channel: Channel,
+                                 direction: str, setup_type: str, fakeout_extreme: float = None) -> np.ndarray:
+        """Extract features for entry model."""
+        closes = df_15m['close'].values
+        highs = df_15m['high'].values
+        lows = df_15m['low'].values
+        volumes = df_15m['volume'].values
+        deltas = df_15m['delta'].values if 'delta' in df_15m.columns else np.zeros(len(df_15m))
+
+        current_close = closes[idx]
+        channel_width = (channel.resistance - channel.support) / channel.support
+        price_in_channel = (current_close - channel.support) / (channel.resistance - channel.support)
+
+        # Volume/Delta ratios
+        vol_20 = np.mean(volumes[max(0,idx-20):idx]) if idx >= 20 else np.mean(volumes[:idx+1])
+        delta_20 = np.mean(deltas[max(0,idx-20):idx]) if idx >= 20 else np.mean(deltas[:idx+1])
+        volume_ratio = volumes[idx] / (vol_20 + 1e-10)
+        delta_ratio = deltas[idx] / (np.abs(delta_20) + 1e-10)
+        cvd_recent = np.sum(deltas[max(0,idx-5):idx+1])
+
+        # ATR
+        if idx >= 14:
+            tr = np.maximum(highs[idx-14:idx] - lows[idx-14:idx],
+                           np.abs(highs[idx-14:idx] - closes[idx-15:idx-1]))
+            atr_14 = np.mean(tr)
+        else:
+            atr_14 = highs[idx] - lows[idx]
+        atr_ratio = atr_14 / (current_close + 1e-10)
+
+        # Momentum & RSI
+        momentum_5 = (closes[idx] - closes[max(0,idx-5)]) / (closes[max(0,idx-5)] + 1e-10)
+        momentum_20 = (closes[idx] - closes[max(0,idx-20)]) / (closes[max(0,idx-20)] + 1e-10)
+
+        # Simple RSI calculation
+        if idx >= 15:
+            price_changes = np.diff(closes[idx-14:idx+1])
+            gains = np.where(price_changes > 0, price_changes, 0)
+            losses = np.where(price_changes < 0, -price_changes, 0)
+            avg_gain = np.mean(gains)
+            avg_loss = np.mean(losses)
+            rs = avg_gain / (avg_loss + 1e-10)
+            rsi_14 = 100 - (100 / (1 + rs))
+        else:
+            rsi_14 = 50.0
+
+        # Candle info
+        body = abs(closes[idx] - df_15m['open'].values[idx])
+        body_size_pct = body / current_close
+        candle_range = highs[idx] - lows[idx]
+        wick_ratio = (candle_range - body) / (candle_range + 1e-10)
+        is_bullish = 1 if closes[idx] > df_15m['open'].values[idx] else 0
+
+        # Time features
+        ts = df_15m['time'].iloc[idx] if 'time' in df_15m.columns else df_15m.index[idx]
+        if hasattr(ts, 'hour'):
+            hour = ts.hour
+            day_of_week = ts.dayofweek
+        else:
+            hour = 12
+            day_of_week = 0
+
+        # Fakeout depth
+        if fakeout_extreme is not None:
+            fakeout_depth = abs(fakeout_extreme - current_close) / current_close
+        else:
+            fakeout_depth = 0.0
+
+        is_bounce = 1 if setup_type == 'BOUNCE' else 0
+        is_long = 1 if direction == 'LONG' else 0
+
+        features = np.array([[
+            channel_width, channel.support_touches, channel.resistance_touches,
+            channel.support_touches + channel.resistance_touches,
+            price_in_channel, volume_ratio, delta_ratio, cvd_recent,
+            vol_20, delta_20, atr_14, atr_ratio,
+            momentum_5, momentum_20, rsi_14, is_bounce, is_long,
+            body_size_pct, wick_ratio, is_bullish, hour, day_of_week,
+            fakeout_depth
+        ]])
+
+        return features
+
+    def _extract_exit_features(self, df_15m: pd.DataFrame, entry_idx: int, tp1_idx: int,
+                                entry_price: float, tp1_price: float, tp2_price: float,
+                                channel_width: float, is_long: bool, is_fakeout: bool) -> np.ndarray:
+        """Extract features for exit model at TP1 hit."""
+        closes = df_15m['close'].values
+        highs = df_15m['high'].values
+        lows = df_15m['low'].values
+        opens = df_15m['open'].values
+        volumes = df_15m['volume'].values
+        deltas = df_15m['delta'].values if 'delta' in df_15m.columns else np.zeros(len(df_15m))
+
+        candles_to_tp1 = tp1_idx - entry_idx
+        time_to_tp1 = candles_to_tp1 * 15
+
+        # Cumulative delta/volume during trade
+        cumulative_delta = np.sum(deltas[entry_idx+1:tp1_idx+1])
+        cumulative_volume = np.sum(volumes[entry_idx+1:tp1_idx+1])
+
+        # Average before entry
+        lookback = 20
+        if entry_idx >= lookback:
+            avg_delta = np.mean(np.abs(deltas[entry_idx-lookback:entry_idx]))
+            avg_volume = np.mean(volumes[entry_idx-lookback:entry_idx])
+        else:
+            avg_delta = 1
+            avg_volume = 1
+
+        delta_ratio = cumulative_delta / (avg_delta * candles_to_tp1 + 1e-10)
+        volume_ratio = cumulative_volume / (avg_volume * candles_to_tp1 + 1e-10)
+
+        # Max favorable excursion
+        if is_long:
+            max_favorable = np.max((highs[entry_idx+1:tp1_idx+1] - entry_price) / entry_price)
+        else:
+            max_favorable = np.max((entry_price - lows[entry_idx+1:tp1_idx+1]) / entry_price)
+
+        # Momentum at TP1
+        if tp1_idx >= 5:
+            momentum_at_tp1 = (closes[tp1_idx] - closes[tp1_idx-5]) / closes[tp1_idx-5]
+        else:
+            momentum_at_tp1 = 0
+
+        # RSI at TP1
+        if tp1_idx >= 15:
+            price_changes = np.diff(closes[tp1_idx-14:tp1_idx+1])
+            gains = np.where(price_changes > 0, price_changes, 0)
+            losses = np.where(price_changes < 0, -price_changes, 0)
+            rs = np.mean(gains) / (np.mean(losses) + 1e-10)
+            rsi_at_tp1 = 100 - (100 / (1 + rs))
+        else:
+            rsi_at_tp1 = 50.0
+
+        # ATR at TP1
+        if tp1_idx >= 14:
+            tr = np.maximum(highs[tp1_idx-14:tp1_idx] - lows[tp1_idx-14:tp1_idx],
+                           np.abs(highs[tp1_idx-14:tp1_idx] - closes[tp1_idx-15:tp1_idx-1]))
+            atr_at_tp1 = np.mean(tr)
+        else:
+            atr_at_tp1 = 0
+
+        price_vs_tp1 = (closes[tp1_idx] - tp1_price) / tp1_price
+
+        if is_long:
+            distance_to_tp2 = (tp2_price - tp1_price) / tp1_price
+        else:
+            distance_to_tp2 = (tp1_price - tp2_price) / tp1_price
+
+        last_body = abs(closes[tp1_idx] - opens[tp1_idx])
+        last_body_pct = last_body / closes[tp1_idx]
+        last_is_bullish = 1 if closes[tp1_idx] > opens[tp1_idx] else 0
+
+        features = np.array([[
+            candles_to_tp1, time_to_tp1, cumulative_delta, cumulative_volume,
+            delta_ratio, volume_ratio, momentum_at_tp1, rsi_at_tp1,
+            atr_at_tp1, max_favorable, price_vs_tp1, distance_to_tp2,
+            channel_width, last_body_pct, last_is_bullish,
+            1 if is_long else 0, 1 if is_fakeout else 0
+        ]])
+
+        return features
+
+    def _predict_entry(self, features: np.ndarray) -> Tuple[bool, float]:
+        """Predict entry decision using ML model."""
+        if self.entry_model is None or self.entry_scaler is None:
+            return True, 1.0
+
+        features_scaled = self.entry_scaler.transform(features)
+        prob = self.entry_model.predict_proba(features_scaled)[0, 1]
+        take = prob >= ENTRY_THRESHOLD
+        return take, prob
+
+    def _predict_exit(self, features: np.ndarray) -> str:
+        """Predict exit decision using ML model."""
+        if self.exit_model is None or self.exit_scaler is None:
+            return 'HOLD'
+
+        features_scaled = self.exit_scaler.transform(features)
+        pred = self.exit_model.predict(features_scaled)[0]
+        return 'EXIT' if pred == EXIT_AT_TP1 else 'HOLD'
+
+    def _process_signal(self, signal: Signal):
+        """Process a new signal for all strategies."""
+        self.signal_counter += 1
+        signal_id = self._save_signal(signal)
+
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f"\n{'='*60}")
+        print(f"[SIGNAL #{self.signal_counter}] {signal.direction} {signal.setup_type}")
+        print(f"  Time: {now}")
+        print(f"  Entry: {signal.entry_price:.2f}")
+        print(f"  SL: {signal.sl_price:.2f} | TP1: {signal.tp1_price:.2f} | TP2: {signal.tp2_price:.2f}")
+        print(f"  ML Entry Prob: {signal.entry_prob:.1%}")
+        print(f"{'='*60}")
+
+        # Strategy 1: NO_ML - Always enter
+        trade_no_ml = Trade(
+            signal_id=signal_id,
+            strategy='NO_ML',
+            timestamp=now,
+            direction=signal.direction,
+            setup_type=signal.setup_type,
+            entry_price=signal.entry_price,
+            sl_price=signal.sl_price,
+            tp1_price=signal.tp1_price,
+            tp2_price=signal.tp2_price
+        )
+        trade_no_ml.db_id = self._save_trade(trade_no_ml)
+        self.strategies['NO_ML'].active_trades.append(trade_no_ml)
+        self.strategies['NO_ML'].total_trades += 1
+        print(f"  [NO_ML] Trade opened")
+
+        # Strategy 2 & 3: Check ML Entry
+        if signal.entry_prob >= ENTRY_THRESHOLD:
+            # ML_ENTRY
+            trade_ml_entry = Trade(
+                signal_id=signal_id,
+                strategy='ML_ENTRY',
+                timestamp=now,
+                direction=signal.direction,
+                setup_type=signal.setup_type,
+                entry_price=signal.entry_price,
+                sl_price=signal.sl_price,
+                tp1_price=signal.tp1_price,
+                tp2_price=signal.tp2_price
+            )
+            trade_ml_entry.db_id = self._save_trade(trade_ml_entry)
+            self.strategies['ML_ENTRY'].active_trades.append(trade_ml_entry)
+            self.strategies['ML_ENTRY'].total_trades += 1
+            print(f"  [ML_ENTRY] Trade opened (prob={signal.entry_prob:.1%} >= {ENTRY_THRESHOLD:.1%})")
+
+            # ML_COMBINED
+            trade_ml_combined = Trade(
+                signal_id=signal_id,
+                strategy='ML_COMBINED',
+                timestamp=now,
+                direction=signal.direction,
+                setup_type=signal.setup_type,
+                entry_price=signal.entry_price,
+                sl_price=signal.sl_price,
+                tp1_price=signal.tp1_price,
+                tp2_price=signal.tp2_price
+            )
+            trade_ml_combined.db_id = self._save_trade(trade_ml_combined)
+            self.strategies['ML_COMBINED'].active_trades.append(trade_ml_combined)
+            self.strategies['ML_COMBINED'].total_trades += 1
+            print(f"  [ML_COMBINED] Trade opened")
+        else:
+            print(f"  [ML_ENTRY] SKIPPED (prob={signal.entry_prob:.1%} < {ENTRY_THRESHOLD:.1%})")
+            print(f"  [ML_COMBINED] SKIPPED")
+
+    def _update_trades(self, current_price: float, current_high: float, current_low: float,
+                       df_15m: pd.DataFrame = None, current_idx: int = None):
+        """Update all active trades with current price."""
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        for strategy_name, state in self.strategies.items():
+            trades_to_remove = []
+
+            for trade in state.active_trades:
+                is_long = trade.direction == 'LONG'
+                closed = False
+                pnl_pct = 0.0
+
+                if trade.status == 'ACTIVE':
+                    # Check SL
+                    if is_long and current_low <= trade.sl_price:
+                        trade.status = 'SL_HIT'
+                        pnl_pct = (trade.sl_price - trade.entry_price) / trade.entry_price
+                        closed = True
+                    elif not is_long and current_high >= trade.sl_price:
+                        trade.status = 'SL_HIT'
+                        pnl_pct = (trade.entry_price - trade.sl_price) / trade.entry_price
+                        closed = True
+                    # Check TP1
+                    elif is_long and current_high >= trade.tp1_price:
+                        trade.status = 'TP1_HIT'
+                        # For ML_COMBINED, decide exit at TP1
+                        if strategy_name == 'ML_COMBINED' and self.exit_model is not None and df_15m is not None:
+                            # TODO: Get exit features and predict
+                            trade.exit_decision = 'HOLD'  # Default to HOLD for now
+                    elif not is_long and current_low <= trade.tp1_price:
+                        trade.status = 'TP1_HIT'
+                        if strategy_name == 'ML_COMBINED' and self.exit_model is not None:
+                            trade.exit_decision = 'HOLD'
+
+                elif trade.status == 'TP1_HIT':
+                    # Check TP2
+                    if is_long and current_high >= trade.tp2_price:
+                        trade.status = 'TP2_HIT'
+                        pnl_pct = 0.5 * (trade.tp1_price - trade.entry_price) / trade.entry_price
+                        pnl_pct += 0.5 * (trade.tp2_price - trade.entry_price) / trade.entry_price
+                        closed = True
+                    elif not is_long and current_low <= trade.tp2_price:
+                        trade.status = 'TP2_HIT'
+                        pnl_pct = 0.5 * (trade.entry_price - trade.tp1_price) / trade.entry_price
+                        pnl_pct += 0.5 * (trade.entry_price - trade.tp2_price) / trade.entry_price
+                        closed = True
+                    # Check BE (breakeven stop after TP1)
+                    elif is_long and current_low <= trade.entry_price:
+                        trade.status = 'BE_HIT'
+                        pnl_pct = 0.5 * (trade.tp1_price - trade.entry_price) / trade.entry_price
+                        closed = True
+                    elif not is_long and current_high >= trade.entry_price:
+                        trade.status = 'BE_HIT'
+                        pnl_pct = 0.5 * (trade.entry_price - trade.tp1_price) / trade.entry_price
+                        closed = True
+
+                if closed:
+                    trade.pnl_pct = pnl_pct
+                    trade.closed_at = now
+
+                    # Update capital
+                    sl_dist = abs(trade.entry_price - trade.sl_price) / trade.entry_price
+                    leverage = min(RISK_PCT / sl_dist, MAX_LEVERAGE) if sl_dist > 0 else 1
+                    position = state.capital * leverage
+                    pnl_dollar = position * pnl_pct - position * FEE_PCT * 2
+
+                    state.capital += pnl_dollar
+                    state.capital = max(state.capital, 0)
+                    state.total_pnl += pnl_dollar
+
+                    if pnl_dollar > 0:
+                        state.wins += 1
+                    else:
+                        state.losses += 1
+
+                    if state.capital > state.peak_capital:
+                        state.peak_capital = state.capital
+
+                    dd = (state.peak_capital - state.capital) / state.peak_capital if state.peak_capital > 0 else 0
+                    state.max_drawdown = max(state.max_drawdown, dd)
+
+                    self._update_trade(trade)
+                    trades_to_remove.append(trade)
+
+                    win_rate = state.wins / (state.wins + state.losses) * 100 if (state.wins + state.losses) > 0 else 0
+                    print(f"\n[{strategy_name}] Trade closed: {trade.status}")
+                    print(f"  PnL: {pnl_pct*100:+.2f}% (${pnl_dollar:+.2f})")
+                    print(f"  Capital: ${state.capital:,.2f} | WR: {win_rate:.1f}% | MaxDD: {state.max_drawdown*100:.1f}%")
+
+            for trade in trades_to_remove:
+                state.active_trades.remove(trade)
+
+    def _find_swing_points(self, candles: pd.DataFrame, confirm_candles: int = 3):
+        """Find swing highs and lows."""
+        if len(candles) < confirm_candles + 1:
+            return [], []
+
+        highs = candles['high'].values
+        lows = candles['low'].values
+        times = candles['time'].values if 'time' in candles.columns else candles.index.values
+
+        swing_highs = []
+        swing_lows = []
+
+        potential_high_idx = 0
+        potential_high_price = highs[0]
+        candles_since_high = 0
+
+        potential_low_idx = 0
+        potential_low_price = lows[0]
+        candles_since_low = 0
+
+        for i in range(1, len(candles)):
+            if highs[i] > potential_high_price:
+                potential_high_idx = i
+                potential_high_price = highs[i]
+                candles_since_high = 0
+            else:
+                candles_since_high += 1
+                if candles_since_high == confirm_candles:
+                    swing_highs.append({'idx': potential_high_idx, 'price': potential_high_price, 'time': times[potential_high_idx]})
+
+            if lows[i] < potential_low_price:
+                potential_low_idx = i
+                potential_low_price = lows[i]
+                candles_since_low = 0
+            else:
+                candles_since_low += 1
+                if candles_since_low == confirm_candles:
+                    swing_lows.append({'idx': potential_low_idx, 'price': potential_low_price, 'time': times[potential_low_idx]})
+
+            if candles_since_high >= confirm_candles:
+                potential_high_price = highs[i]
+                potential_high_idx = i
+                candles_since_high = 0
+
+            if candles_since_low >= confirm_candles:
+                potential_low_price = lows[i]
+                potential_low_idx = i
+                candles_since_low = 0
+
+        return swing_highs, swing_lows
+
+    def _update_channel(self, df_1h: pd.DataFrame) -> Optional[Channel]:
+        """Update channel detection."""
+        if len(df_1h) < 20:
+            return None
+
+        swing_highs, swing_lows = self._find_swing_points(df_1h)
+
+        if len(swing_highs) < 2 or len(swing_lows) < 2:
+            return None
+
+        current_close = df_1h['close'].iloc[-1]
+        best_channel = None
+        best_score = -1
+
+        for sh in swing_highs[-10:]:
+            for sl in swing_lows[-10:]:
+                if sh['price'] <= sl['price']:
+                    continue
+
+                width_pct = (sh['price'] - sl['price']) / sl['price']
+                if width_pct < 0.008 or width_pct > 0.05:
+                    continue
+
+                if current_close < sl['price'] * 0.98 or current_close > sh['price'] * 1.02:
+                    continue
+
+                support_touches = sum(1 for s in swing_lows if abs(s['price'] - sl['price']) / sl['price'] < 0.004)
+                resistance_touches = sum(1 for s in swing_highs if abs(s['price'] - sh['price']) / sh['price'] < 0.004)
+
+                confirmed = support_touches >= 2 and resistance_touches >= 2
+
+                if confirmed:
+                    score = support_touches + resistance_touches
+                    if score > best_score:
+                        best_score = score
+                        lowest = min(s['price'] for s in swing_lows[-20:]) if swing_lows else sl['price']
+                        highest = max(s['price'] for s in swing_highs[-20:]) if swing_highs else sh['price']
+                        best_channel = Channel(
+                            support=sl['price'],
+                            resistance=sh['price'],
+                            support_touches=support_touches,
+                            resistance_touches=resistance_touches,
+                            lowest_low=lowest,
+                            highest_high=highest,
+                            confirmed=True
+                        )
+
+        return best_channel
+
+    def _check_fakeout(self, df_1h: pd.DataFrame, channel: Channel) -> Optional[dict]:
+        """Check for fakeout signals."""
+        if not channel or not channel.confirmed:
+            return None
+
+        current_close = df_1h['close'].iloc[-1]
+        current_high = df_1h['high'].iloc[-1]
+        current_low = df_1h['low'].iloc[-1]
+
+        # Check pending fakeouts
+        for key in list(self.pending_fakeouts.keys()):
+            pf = self.pending_fakeouts[key]
+            candles_since = len(df_1h) - 1 - pf['break_idx']
+
+            if candles_since > 5:
+                del self.pending_fakeouts[key]
+                continue
+
+            if pf['type'] == 'bear':
+                pf['extreme'] = min(pf['extreme'], current_low)
+                if current_close > channel.support:
+                    del self.pending_fakeouts[key]
+                    return {'type': 'bear', 'extreme': pf['extreme'], 'channel': channel}
+            else:
+                pf['extreme'] = max(pf['extreme'], current_high)
+                if current_close < channel.resistance:
+                    del self.pending_fakeouts[key]
+                    return {'type': 'bull', 'extreme': pf['extreme'], 'channel': channel}
+
+        # Check new breakouts
+        if current_close < channel.support * 0.997:
+            if 'bear' not in self.pending_fakeouts:
+                self.pending_fakeouts['bear'] = {
+                    'type': 'bear',
+                    'break_idx': len(df_1h) - 1,
+                    'extreme': current_low
+                }
+        elif current_close > channel.resistance * 1.003:
+            if 'bull' not in self.pending_fakeouts:
+                self.pending_fakeouts['bull'] = {
+                    'type': 'bull',
+                    'break_idx': len(df_1h) - 1,
+                    'extreme': current_high
+                }
+
+        return None
+
+    def _scan_for_signals(self):
+        """Scan for new trading signals."""
+        df_1h = self._load_candles(HTF, 200)
+        df_15m = self._load_candles(LTF, 500)
+
+        if len(df_1h) < 50 or len(df_15m) < 50:
+            return
+
+        # Update channel
+        channel = self._update_channel(df_1h)
+        if channel:
+            self.current_channel = channel
+
+        if not hasattr(self, 'current_channel') or self.current_channel is None:
+            return
+
+        channel = self.current_channel
+        current_close = df_15m['close'].iloc[-1]
+        current_high = df_15m['high'].iloc[-1]
+        current_low = df_15m['low'].iloc[-1]
+        current_time = df_15m['time'].iloc[-1] if 'time' in df_15m.columns else datetime.now()
+
+        # Update existing trades first
+        self._update_trades(current_close, current_high, current_low, df_15m, len(df_15m)-1)
+
+        mid_price = (channel.resistance + channel.support) / 2
+
+        # Check for fakeout signal
+        fakeout = self._check_fakeout(df_1h, channel)
+        if fakeout:
+            f_channel = fakeout['channel']
+            f_mid = (f_channel.resistance + f_channel.support) / 2
+
+            if fakeout['type'] == 'bear':
+                entry = current_close
+                sl = fakeout['extreme'] * (1 - SL_BUFFER_PCT)
+                tp1 = f_mid
+                tp2 = f_channel.resistance * 0.998
+
+                if entry > sl and tp1 > entry:
+                    # Get ML entry probability
+                    features = self._extract_entry_features(df_15m, len(df_15m)-1, f_channel, 'LONG', 'FAKEOUT', fakeout['extreme'])
+                    take, prob = self._predict_entry(features)
+
+                    signal = Signal(
+                        timestamp=str(current_time),
+                        direction='LONG',
+                        setup_type='FAKEOUT',
+                        entry_price=entry,
+                        sl_price=sl,
+                        tp1_price=tp1,
+                        tp2_price=tp2,
+                        channel_support=f_channel.support,
+                        channel_resistance=f_channel.resistance,
+                        entry_prob=prob
+                    )
+                    self._process_signal(signal)
+            else:
+                entry = current_close
+                sl = fakeout['extreme'] * (1 + SL_BUFFER_PCT)
+                tp1 = f_mid
+                tp2 = f_channel.support * 1.002
+
+                if sl > entry and entry > tp1:
+                    features = self._extract_entry_features(df_15m, len(df_15m)-1, f_channel, 'SHORT', 'FAKEOUT', fakeout['extreme'])
+                    take, prob = self._predict_entry(features)
+
+                    signal = Signal(
+                        timestamp=str(current_time),
+                        direction='SHORT',
+                        setup_type='FAKEOUT',
+                        entry_price=entry,
+                        sl_price=sl,
+                        tp1_price=tp1,
+                        tp2_price=tp2,
+                        channel_support=f_channel.support,
+                        channel_resistance=f_channel.resistance,
+                        entry_prob=prob
+                    )
+                    self._process_signal(signal)
+
+        # Check for bounce signals
+        signal_key = f"{round(channel.support)}_{round(channel.resistance)}_{str(current_time)[:13]}"
+        if not hasattr(self, 'recent_signals'):
+            self.recent_signals = set()
+
+        if signal_key not in self.recent_signals:
+            # Support bounce → LONG
+            if current_low <= channel.support * (1 + TOUCH_THRESHOLD) and current_close > channel.support:
+                entry = current_close
+                sl = channel.support * (1 - SL_BUFFER_PCT)
+                tp1 = mid_price
+                tp2 = channel.resistance * 0.998
+
+                if entry > sl and tp1 > entry:
+                    features = self._extract_entry_features(df_15m, len(df_15m)-1, channel, 'LONG', 'BOUNCE', None)
+                    take, prob = self._predict_entry(features)
+
+                    signal = Signal(
+                        timestamp=str(current_time),
+                        direction='LONG',
+                        setup_type='BOUNCE',
+                        entry_price=entry,
+                        sl_price=sl,
+                        tp1_price=tp1,
+                        tp2_price=tp2,
+                        channel_support=channel.support,
+                        channel_resistance=channel.resistance,
+                        entry_prob=prob
+                    )
+                    self._process_signal(signal)
+                    self.recent_signals.add(signal_key)
+
+            # Resistance bounce → SHORT
+            elif current_high >= channel.resistance * (1 - TOUCH_THRESHOLD) and current_close < channel.resistance:
+                entry = current_close
+                sl = channel.resistance * (1 + SL_BUFFER_PCT)
+                tp1 = mid_price
+                tp2 = channel.support * 1.002
+
+                if sl > entry and entry > tp1:
+                    features = self._extract_entry_features(df_15m, len(df_15m)-1, channel, 'SHORT', 'BOUNCE', None)
+                    take, prob = self._predict_entry(features)
+
+                    signal = Signal(
+                        timestamp=str(current_time),
+                        direction='SHORT',
+                        setup_type='BOUNCE',
+                        entry_price=entry,
+                        sl_price=sl,
+                        tp1_price=tp1,
+                        tp2_price=tp2,
+                        channel_support=channel.support,
+                        channel_resistance=channel.resistance,
+                        entry_prob=prob
+                    )
+                    self._process_signal(signal)
+                    self.recent_signals.add(signal_key)
+
+        # Clean old signal keys
+        if len(self.recent_signals) > 100:
+            self.recent_signals = set(list(self.recent_signals)[-50:])
+
+    def run(self):
+        """Main service loop."""
+        self.running = True
+        print(f"\n{'='*60}")
+        print("  ML PAPER TRADING SERVICE STARTED")
+        print(f"  Strategies: NO_ML, ML_ENTRY (0.7), ML_COMBINED")
+        print(f"  Initial Capital: ${INITIAL_CAPITAL:,.2f}")
+        print(f"{'='*60}\n")
+
+        # Start HTTP server in background
+        server_thread = threading.Thread(target=self._run_http_server, daemon=True)
+        server_thread.start()
+        print(f"[HTTP] Status server started on port {SERVICE_PORT}")
+        print(f"       http://localhost:{SERVICE_PORT}/status")
+
+        scan_interval = 60  # 1 minute
+        last_scan = 0
+
+        while self.running:
+            try:
+                now = time.time()
+
+                if now - last_scan >= scan_interval:
+                    self._scan_for_signals()
+                    last_scan = now
+
+                time.sleep(1)
+
+            except KeyboardInterrupt:
+                print("\n[SERVICE] Shutting down...")
+                self.running = False
+            except Exception as e:
+                print(f"[ERROR] {e}")
+                time.sleep(5)
+
+        # Save final states
+        for name, state in self.strategies.items():
+            self._save_strategy_state(name, state)
+
+        print("[SERVICE] Stopped")
+
+    def _run_http_server(self):
+        """Run HTTP server for status endpoint."""
+        service = self
+
+        class StatusHandler(BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                pass  # Suppress logs
+
+            def do_GET(self):
+                if self.path.startswith('/status'):
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+
+                    status = {
+                        'timestamp': datetime.now().isoformat(),
+                        'strategies': {}
+                    }
+
+                    for name, state in service.strategies.items():
+                        win_rate = state.wins / (state.wins + state.losses) * 100 if (state.wins + state.losses) > 0 else 0
+                        status['strategies'][name] = {
+                            'name': state.name,
+                            'capital': round(state.capital, 2),
+                            'return_pct': round((state.capital / INITIAL_CAPITAL - 1) * 100, 2),
+                            'total_trades': state.total_trades,
+                            'wins': state.wins,
+                            'losses': state.losses,
+                            'win_rate': round(win_rate, 1),
+                            'max_drawdown': round(state.max_drawdown * 100, 1),
+                            'active_trades': len(state.active_trades)
+                        }
+
+                    self.wfile.write(json.dumps(status, indent=2).encode())
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+        server = HTTPServer(('', SERVICE_PORT), StatusHandler)
+        server.serve_forever()
+
+    def print_status(self):
+        """Print current status of all strategies."""
+        print(f"\n{'='*70}")
+        print(f"  PAPER TRADING STATUS - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"{'='*70}")
+        print(f"{'Strategy':<25} {'Capital':>12} {'Return':>10} {'Trades':>8} {'WR':>8} {'MaxDD':>8}")
+        print(f"{'-'*70}")
+
+        for name, state in self.strategies.items():
+            win_rate = state.wins / (state.wins + state.losses) * 100 if (state.wins + state.losses) > 0 else 0
+            ret = (state.capital / INITIAL_CAPITAL - 1) * 100
+            print(f"{state.name:<25} ${state.capital:>10,.2f} {ret:>+9.1f}% {state.total_trades:>8} {win_rate:>7.1f}% {state.max_drawdown*100:>7.1f}%")
+
+        print(f"{'='*70}\n")
+
+
+def main():
+    service = MLPaperTradingService()
+    service.run()
+
+
+if __name__ == "__main__":
+    main()
