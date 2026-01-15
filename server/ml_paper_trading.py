@@ -690,7 +690,14 @@ class MLPaperTradingService:
 
         swing_highs, swing_lows = self._find_swing_points(df_1h)
 
+        print(f"[CHANNEL] Found {len(swing_highs)} swing highs, {len(swing_lows)} swing lows")
+        if swing_highs:
+            print(f"[CHANNEL] Highs: {[round(s['price']) for s in swing_highs[-5:]]}")
+        if swing_lows:
+            print(f"[CHANNEL] Lows: {[round(s['price']) for s in swing_lows[-5:]]}")
+
         if len(swing_highs) < 2 or len(swing_lows) < 2:
+            print(f"[CHANNEL] Not enough swing points")
             return None
 
         current_close = df_1h['close'].iloc[-1]
@@ -713,6 +720,9 @@ class MLPaperTradingService:
                 resistance_touches = sum(1 for s in swing_highs if abs(s['price'] - sh['price']) / sh['price'] < 0.004)
 
                 confirmed = support_touches >= 2 and resistance_touches >= 2
+
+                if support_touches >= 1 and resistance_touches >= 1:
+                    print(f"[CHANNEL] Candidate: S={sl['price']:.0f}({support_touches}) R={sh['price']:.0f}({resistance_touches}) width={width_pct*100:.1f}% confirmed={confirmed}")
 
                 if confirmed:
                     score = support_touches + resistance_touches
