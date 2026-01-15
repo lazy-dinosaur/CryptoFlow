@@ -72,12 +72,14 @@ module.exports = {
             script: 'ml_paper_trading.py',
             cwd: './server',
             interpreter: 'python3',
+            interpreter_args: '-u',
             instances: 1,
             autorestart: true,
             watch: false,
             max_memory_restart: '500M',
             env: {
-                NODE_ENV: 'production'
+                NODE_ENV: 'production',
+                PYTHONUNBUFFERED: '1'
             },
             log_date_format: 'YYYY-MM-DD HH:mm:ss',
             error_file: './logs/ml-paper-error.log',

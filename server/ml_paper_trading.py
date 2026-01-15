@@ -784,15 +784,20 @@ class MLPaperTradingService:
         df_1h = self._load_candles(HTF, 200)
         df_15m = self._load_candles(LTF, 500)
 
-        if len(df_1h) < 50 or len(df_15m) < 50:
+        print(f"[SCAN] Loaded {len(df_1h)} 1h candles, {len(df_15m)} 15m candles")
+
+        if len(df_1h) < 20 or len(df_15m) < 20:
+            print(f"[SCAN] Not enough data (need 20+)")
             return
 
         # Update channel
         channel = self._update_channel(df_1h)
         if channel:
             self.current_channel = channel
+            print(f"[CHANNEL] Detected: {channel.support:.0f} - {channel.resistance:.0f} (touches: S={channel.support_touches}, R={channel.resistance_touches})")
 
         if not hasattr(self, 'current_channel') or self.current_channel is None:
+            print(f"[SCAN] No channel detected yet")
             return
 
         channel = self.current_channel
