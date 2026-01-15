@@ -806,6 +806,9 @@ class MLPaperTradingService:
         current_low = df_15m['low'].iloc[-1]
         current_time = df_15m['time'].iloc[-1] if 'time' in df_15m.columns else datetime.now()
 
+        # Save current price for API
+        self.last_price = current_close
+
         # Update existing trades first
         self._update_trades(current_close, current_high, current_low, df_15m, len(df_15m)-1)
 
@@ -985,8 +988,25 @@ class MLPaperTradingService:
 
                     status = {
                         'timestamp': datetime.now().isoformat(),
+                        'channel': None,
+                        'current_price': None,
                         'strategies': {}
                     }
+
+                    # Add channel info if available
+                    if hasattr(service, 'current_channel') and service.current_channel:
+                        ch = service.current_channel
+                        status['channel'] = {
+                            'support': round(ch.support, 2),
+                            'resistance': round(ch.resistance, 2),
+                            'support_touches': ch.support_touches,
+                            'resistance_touches': ch.resistance_touches,
+                            'width_pct': round((ch.resistance - ch.support) / ch.support * 100, 2)
+                        }
+
+                    # Add current price if available
+                    if hasattr(service, 'last_price') and service.last_price:
+                        status['current_price'] = round(service.last_price, 2)
 
                     for name, state in service.strategies.items():
                         win_rate = state.wins / (state.wins + state.losses) * 100 if (state.wins + state.losses) > 0 else 0
