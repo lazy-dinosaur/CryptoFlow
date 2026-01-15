@@ -32,7 +32,7 @@ PAPER_DB_PATH = os.path.join(SCRIPT_DIR, 'data', 'ml_paper_trading.db')
 MODELS_DIR = os.path.join(SCRIPT_DIR, '..', 'backtest', 'models')
 
 # Configuration
-SYMBOL = "BTCUSDT"
+SYMBOL = "BINANCE:BTCUSDT"
 HTF = "1h"
 LTF = "15m"
 SERVICE_PORT = 5003
