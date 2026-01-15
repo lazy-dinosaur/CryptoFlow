@@ -165,6 +165,47 @@ export class MLDashboard {
         };
 
         let html = '';
+
+        // Channel info
+        const channel = this.paperTradingData.channel;
+        const currentPrice = this.paperTradingData.current_price;
+        if (channel) {
+            const priceInChannel = currentPrice ?
+                ((currentPrice - channel.support) / (channel.resistance - channel.support) * 100).toFixed(0) : '--';
+            const nearSupport = currentPrice && (currentPrice - channel.support) / channel.support < 0.005;
+            const nearResistance = currentPrice && (channel.resistance - currentPrice) / channel.resistance < 0.005;
+
+            html += `
+                <div class="paper-channel">
+                    <div class="channel-header">📊 Active Channel</div>
+                    <div class="channel-levels">
+                        <div class="channel-level ${nearResistance ? 'near' : ''}">
+                            <span>R</span>
+                            <span class="channel-price">${channel.resistance.toLocaleString()}</span>
+                            <span class="channel-touches">(${channel.resistance_touches})</span>
+                        </div>
+                        <div class="channel-current">
+                            <span>Now</span>
+                            <span class="channel-price current">${currentPrice ? currentPrice.toLocaleString() : '--'}</span>
+                            <span class="channel-pct">${priceInChannel}%</span>
+                        </div>
+                        <div class="channel-level ${nearSupport ? 'near' : ''}">
+                            <span>S</span>
+                            <span class="channel-price">${channel.support.toLocaleString()}</span>
+                            <span class="channel-touches">(${channel.support_touches})</span>
+                        </div>
+                    </div>
+                    <div class="channel-width">Width: ${channel.width_pct}%</div>
+                </div>
+            `;
+        } else {
+            html += `
+                <div class="paper-channel no-channel">
+                    <div class="channel-header">📊 Channel</div>
+                    <div class="channel-status">Scanning for channel...</div>
+                </div>
+            `;
+        }
         for (const key of strategyOrder) {
             const data = strategies[key];
             if (!data) continue;
@@ -454,6 +495,101 @@ export class MLDashboard {
 
             .paper-stat-value {
                 color: #fff;
+            }
+
+            /* Channel Display */
+            .paper-channel {
+                padding: 10px;
+                margin-bottom: 10px;
+                background: rgba(0, 150, 255, 0.1);
+                border: 1px solid rgba(0, 150, 255, 0.3);
+                border-radius: 6px;
+            }
+
+            .paper-channel.no-channel {
+                background: rgba(255, 255, 255, 0.03);
+                border-color: rgba(255, 255, 255, 0.1);
+            }
+
+            .channel-header {
+                font-size: 11px;
+                font-weight: 600;
+                margin-bottom: 8px;
+                color: #00bcd4;
+            }
+
+            .channel-levels {
+                display: flex;
+                flex-direction: column;
+                gap: 4px;
+            }
+
+            .channel-level {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                font-size: 10px;
+                color: #8899aa;
+            }
+
+            .channel-level.near {
+                color: #ffd700;
+                font-weight: bold;
+            }
+
+            .channel-level span:first-child {
+                width: 20px;
+                font-weight: bold;
+            }
+
+            .channel-current {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                font-size: 11px;
+                padding: 4px 0;
+                border-top: 1px dashed rgba(255,255,255,0.1);
+                border-bottom: 1px dashed rgba(255,255,255,0.1);
+            }
+
+            .channel-current span:first-child {
+                width: 20px;
+                font-weight: bold;
+                color: #00e676;
+            }
+
+            .channel-price {
+                font-family: monospace;
+                color: #fff;
+            }
+
+            .channel-price.current {
+                color: #00e676;
+                font-weight: bold;
+            }
+
+            .channel-touches {
+                font-size: 9px;
+                color: #8899aa;
+            }
+
+            .channel-pct {
+                font-size: 9px;
+                color: #00bcd4;
+            }
+
+            .channel-width {
+                margin-top: 6px;
+                font-size: 9px;
+                color: #8899aa;
+                text-align: center;
+            }
+
+            .channel-status {
+                font-size: 10px;
+                color: #8899aa;
+                text-align: center;
+                padding: 10px 0;
             }
 
             .paper-summary {
