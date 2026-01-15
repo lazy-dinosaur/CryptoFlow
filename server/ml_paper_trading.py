@@ -33,8 +33,8 @@ MODELS_DIR = os.path.join(SCRIPT_DIR, '..', 'backtest', 'models')
 
 # Configuration
 SYMBOL = "BINANCE:BTCUSDT"
-HTF = "1h"
-LTF = "15m"
+HTF = "30m"  # 채널 감지
+LTF = "5m"   # 진입
 SERVICE_PORT = 5003
 
 # Strategy parameters
