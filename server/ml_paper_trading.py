@@ -716,8 +716,10 @@ class MLPaperTradingService:
                 if current_close < sl['price'] * 0.98 or current_close > sh['price'] * 1.02:
                     continue
 
-                support_touches = sum(1 for s in swing_lows if abs(s['price'] - sl['price']) / sl['price'] < 0.004)
-                resistance_touches = sum(1 for s in swing_highs if abs(s['price'] - sh['price']) / sh['price'] < 0.004)
+                # Use 0.6% tolerance for touches (relaxed from 0.4% due to limited data)
+                touch_tolerance = 0.006
+                support_touches = sum(1 for s in swing_lows if abs(s['price'] - sl['price']) / sl['price'] < touch_tolerance)
+                resistance_touches = sum(1 for s in swing_highs if abs(s['price'] - sh['price']) / sh['price'] < touch_tolerance)
 
                 confirmed = support_touches >= 2 and resistance_touches >= 2
 
