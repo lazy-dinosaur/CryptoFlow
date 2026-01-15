@@ -21,6 +21,7 @@ export class FootprintChart {
         this.nakedLiquidityLevels = [];
         this.bigTrades = [];
         this.currentPrice = null;
+        this.channel = null; // { support, resistance, support_touches, resistance_touches }
 
         // View
         this.width = 0;
@@ -50,6 +51,7 @@ export class FootprintChart {
         this.showML = true;
         this.showImbalances = true;
         this.showLens = false;
+        this.showChannel = true; // ML Paper Trading channel
 
         // Profile Data
         this.sessionProfile = []; // { price, vol }
@@ -156,6 +158,12 @@ export class FootprintChart {
 
     updateSessionMarkers(markers) {
         this.sessionMarkers = markers || [];
+        this.requestDraw();
+    }
+
+    setChannel(channel) {
+        // channel: { support, resistance, support_touches, resistance_touches, width_pct }
+        this.channel = channel;
         this.requestDraw();
     }
 
@@ -402,6 +410,9 @@ export class FootprintChart {
             // Usually Profile is subtle background on the right.
             if (this.showSessionProfile) this._drawSessionProfile(ctx);
 
+            // Draw ML Channel (Support/Resistance)
+            if (this.showChannel) this._drawChannel(ctx);
+
             this._drawCandles(ctx);
 
             // Draw Bottom Panels
@@ -526,6 +537,64 @@ export class FootprintChart {
             ctx.globalAlpha = 0.05;
             ctx.fillStyle = '#fbbf24';
             ctx.fillRect(width - profileWidth, vahY, profileWidth, valY - vahY);
+        }
+
+        ctx.restore();
+    }
+
+    _drawChannel(ctx) {
+        if (!this.channel) return;
+        const { width, height } = this;
+        const deltaH = this._deltaH();
+        const { support, resistance, support_touches, resistance_touches } = this.channel;
+
+        ctx.save();
+
+        // Draw Support Line (Green)
+        const supportY = this._getY(support);
+        if (supportY > 0 && supportY < height - deltaH) {
+            ctx.globalAlpha = 0.8;
+            ctx.strokeStyle = '#10b981'; // Emerald
+            ctx.lineWidth = 2;
+            ctx.setLineDash([8, 4]);
+            ctx.beginPath();
+            ctx.moveTo(0, supportY);
+            ctx.lineTo(width, supportY);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Support Label
+            ctx.font = 'bold 10px monospace';
+            ctx.fillStyle = '#10b981';
+            ctx.textAlign = 'left';
+            ctx.fillText(`S ${support.toLocaleString()} (${support_touches})`, 5, supportY - 5);
+        }
+
+        // Draw Resistance Line (Red)
+        const resistanceY = this._getY(resistance);
+        if (resistanceY > 0 && resistanceY < height - deltaH) {
+            ctx.globalAlpha = 0.8;
+            ctx.strokeStyle = '#ef4444'; // Red
+            ctx.lineWidth = 2;
+            ctx.setLineDash([8, 4]);
+            ctx.beginPath();
+            ctx.moveTo(0, resistanceY);
+            ctx.lineTo(width, resistanceY);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Resistance Label
+            ctx.font = 'bold 10px monospace';
+            ctx.fillStyle = '#ef4444';
+            ctx.textAlign = 'left';
+            ctx.fillText(`R ${resistance.toLocaleString()} (${resistance_touches})`, 5, resistanceY + 12);
+        }
+
+        // Draw Channel Shading (subtle)
+        if (supportY > 0 && resistanceY > 0 && supportY < height - deltaH && resistanceY < height - deltaH) {
+            ctx.globalAlpha = 0.05;
+            ctx.fillStyle = '#06b6d4'; // Cyan tint
+            ctx.fillRect(0, resistanceY, width, supportY - resistanceY);
         }
 
         ctx.restore();

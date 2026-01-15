@@ -212,8 +212,36 @@ class CryptoFlowApp {
             }
         });
 
+        // Setup Channel Fetching from Paper Trading API
+        this._startChannelPolling();
+    }
 
+    /**
+     * Start polling for ML channel data
+     */
+    _startChannelPolling() {
+        const isLocalHost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+        const paperApiUrl = isLocalHost ? 'http://134.185.107.33:5003' : `${window.location.protocol}//${window.location.hostname}:5003`;
 
+        const fetchChannel = async () => {
+            try {
+                const response = await fetch(`${paperApiUrl}/status`);
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.channel && this.footprintChart) {
+                        this.footprintChart.setChannel(data.channel);
+                    }
+                }
+            } catch (e) {
+                // Silent fail - paper trading service might not be running
+            }
+        };
+
+        // Initial fetch
+        fetchChannel();
+
+        // Poll every 30 seconds
+        setInterval(fetchChannel, 30000);
     }
 
     /**
