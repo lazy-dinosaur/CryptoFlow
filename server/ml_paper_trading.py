@@ -262,10 +262,17 @@ class MLPaperTradingService:
 
     def _load_candles(self, timeframe: str, limit: int = 500) -> pd.DataFrame:
         """Load candles from database."""
+        # Convert timeframe to minutes for table name
+        tf_to_minutes = {
+            '1m': 1, '5m': 5, '15m': 15, '30m': 30,
+            '1h': 60, '4h': 240, '1d': 1440
+        }
+        tf_minutes = tf_to_minutes.get(timeframe, timeframe)
+
         conn = sqlite3.connect(DB_PATH)
         query = f'''
             SELECT time, open, high, low, close, volume, delta
-            FROM candles_{timeframe}
+            FROM candles_{tf_minutes}
             WHERE symbol = ?
             ORDER BY time DESC
             LIMIT ?
