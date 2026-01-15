@@ -11,12 +11,15 @@ export class MLDashboard {
         const isLocalHost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
         const baseUrl = isLocalHost ? 'http://134.185.107.33:3000' : '';
         this.apiUrl = `${baseUrl}/api/ml`;
+        this.paperApiUrl = isLocalHost ? 'http://134.185.107.33:5003' : `${window.location.protocol}//${window.location.hostname}:5003`;
 
         this.status = null;
         this.expanded = false;
         this.signals = [];
         this.signalStats = {};
         this.signalFilter = 'ALL'; // ALL, LONG, SHORT
+        this.activeMainTab = 'signals'; // 'signals' or 'paper'
+        this.paperTradingData = null;
 
         this._init();
         this._startPolling();
@@ -54,8 +57,14 @@ export class MLDashboard {
                     <span class="ml-expand">▼</span>
                 </div>
                 <div class="ml-content" id="mlContent" style="display: none;">
-                    <div class="ml-stats" id="mlStats">
-                        Loading...
+                    <div class="ml-main-tabs">
+                        <button class="ml-main-tab active" data-tab="signals">📊 ML Signals</button>
+                        <button class="ml-main-tab" data-tab="paper">📈 Paper Trading</button>
+                    </div>
+                    <div class="ml-tab-content" id="mlTabContent">
+                        <div class="ml-stats" id="mlStats">
+                            Loading...
+                        </div>
                     </div>
                 </div>
             </div>
@@ -75,8 +84,139 @@ export class MLDashboard {
             });
         }
 
+        // Main tab handlers
+        this._setupMainTabHandlers();
+
         console.log('MLDashboard initialized (Dynamic Overlay Mode)');
         this.setVisible(true);
+    }
+
+    _setupMainTabHandlers() {
+        const tabs = this.container.querySelectorAll('.ml-main-tab');
+        tabs.forEach(tab => {
+            tab.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const tabName = tab.dataset.tab;
+                this.activeMainTab = tabName;
+
+                // Update active state
+                tabs.forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+
+                // Switch content
+                if (tabName === 'signals') {
+                    this._updateUI();
+                } else if (tabName === 'paper') {
+                    this._fetchPaperTradingStatus();
+                }
+            });
+        });
+    }
+
+    async _fetchPaperTradingStatus() {
+        const content = this.container.querySelector('#mlTabContent');
+        if (content) {
+            content.innerHTML = '<div class="paper-no-data">Loading Paper Trading data...</div>';
+        }
+
+        try {
+            const response = await fetch(`${this.paperApiUrl}/status`);
+            if (!response.ok) throw new Error('Paper trading service not available');
+            this.paperTradingData = await response.json();
+            this._renderPaperTrading();
+        } catch (error) {
+            console.warn('Paper trading fetch error:', error);
+            if (content) {
+                content.innerHTML = `
+                    <div class="paper-no-data">
+                        Paper Trading service not available<br>
+                        <span style="font-size: 9px; color: #666;">Start with: pm2 start ecosystem.config.cjs --only ml-paper</span>
+                    </div>
+                `;
+            }
+        }
+    }
+
+    _renderPaperTrading() {
+        const content = this.container.querySelector('#mlTabContent');
+        if (!content || !this.paperTradingData) return;
+
+        const strategies = this.paperTradingData.strategies;
+        if (!strategies) {
+            content.innerHTML = '<div class="paper-no-data">No data available</div>';
+            return;
+        }
+
+        // Find best strategy by return
+        let bestKey = null;
+        let bestReturn = -Infinity;
+        for (const [key, data] of Object.entries(strategies)) {
+            if (data.return_pct > bestReturn) {
+                bestReturn = data.return_pct;
+                bestKey = key;
+            }
+        }
+
+        const strategyOrder = ['NO_ML', 'ML_ENTRY', 'ML_COMBINED'];
+        const strategyLabels = {
+            'NO_ML': '🎯 No ML (All Signals)',
+            'ML_ENTRY': '🧠 ML Entry Only',
+            'ML_COMBINED': '🚀 ML Combined'
+        };
+
+        let html = '';
+        for (const key of strategyOrder) {
+            const data = strategies[key];
+            if (!data) continue;
+
+            const isBest = key === bestKey && data.total_trades > 0;
+            const returnClass = data.return_pct >= 0 ? 'positive' : 'negative';
+
+            html += `
+                <div class="paper-strategy ${isBest ? 'best' : ''}">
+                    <div class="paper-strategy-name">
+                        <span>${strategyLabels[key] || key}</span>
+                        <span class="paper-strategy-return ${returnClass}">${data.return_pct >= 0 ? '+' : ''}${data.return_pct.toFixed(1)}%</span>
+                    </div>
+                    <div class="paper-strategy-stats">
+                        <div class="paper-stat">
+                            <span>Capital</span>
+                            <span class="paper-stat-value">$${data.capital.toLocaleString()}</span>
+                        </div>
+                        <div class="paper-stat">
+                            <span>Trades</span>
+                            <span class="paper-stat-value">${data.total_trades}</span>
+                        </div>
+                        <div class="paper-stat">
+                            <span>Win Rate</span>
+                            <span class="paper-stat-value">${data.win_rate.toFixed(1)}%</span>
+                        </div>
+                        <div class="paper-stat">
+                            <span>Max DD</span>
+                            <span class="paper-stat-value">${data.max_drawdown.toFixed(1)}%</span>
+                        </div>
+                        <div class="paper-stat">
+                            <span>W/L</span>
+                            <span class="paper-stat-value">${data.wins}/${data.losses}</span>
+                        </div>
+                        <div class="paper-stat">
+                            <span>Active</span>
+                            <span class="paper-stat-value">${data.active_trades}</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        // Summary
+        const totalTrades = Object.values(strategies).reduce((sum, s) => sum + s.total_trades, 0) / 3;
+        html += `
+            <div class="paper-summary">
+                ${bestKey && bestReturn > 0 ? `Best: ${strategyLabels[bestKey]} (+${bestReturn.toFixed(1)}%)` : 'Waiting for trades...'}
+            </div>
+        `;
+
+        content.innerHTML = html;
     }
 
     _addStyles() {
@@ -238,6 +378,100 @@ export class MLDashboard {
             
             /* FAILSAFE HIDDEN CLASS */
             .hidden { display: none !important; }
+
+            /* Main Tabs */
+            .ml-main-tabs {
+                display: flex;
+                border-bottom: 1px solid rgba(255,255,255,0.1);
+            }
+
+            .ml-main-tab {
+                flex: 1;
+                padding: 8px;
+                text-align: center;
+                font-size: 11px;
+                color: #8899aa;
+                cursor: pointer;
+                border: none;
+                background: transparent;
+                transition: all 0.2s;
+            }
+
+            .ml-main-tab:hover {
+                color: #fff;
+                background: rgba(255,255,255,0.05);
+            }
+
+            .ml-main-tab.active {
+                color: #00e676;
+                border-bottom: 2px solid #00e676;
+                background: rgba(0, 230, 118, 0.1);
+            }
+
+            /* Paper Trading Styles */
+            .paper-strategy {
+                padding: 10px;
+                margin: 6px 0;
+                background: rgba(255,255,255,0.03);
+                border-radius: 6px;
+                border-left: 3px solid #8899aa;
+            }
+
+            .paper-strategy.best {
+                border-left-color: #00e676;
+                background: rgba(0, 230, 118, 0.05);
+            }
+
+            .paper-strategy-name {
+                font-size: 11px;
+                font-weight: 600;
+                margin-bottom: 6px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+            }
+
+            .paper-strategy-return {
+                font-size: 13px;
+                font-weight: 700;
+            }
+
+            .paper-strategy-return.positive { color: #00e676; }
+            .paper-strategy-return.negative { color: #ff5252; }
+
+            .paper-strategy-stats {
+                display: grid;
+                grid-template-columns: repeat(2, 1fr);
+                gap: 4px;
+                font-size: 10px;
+                color: #8899aa;
+            }
+
+            .paper-stat {
+                display: flex;
+                justify-content: space-between;
+            }
+
+            .paper-stat-value {
+                color: #fff;
+            }
+
+            .paper-summary {
+                padding: 8px;
+                margin-top: 10px;
+                background: rgba(0, 230, 118, 0.1);
+                border-radius: 4px;
+                font-size: 10px;
+                text-align: center;
+                color: #00e676;
+            }
+
+            .paper-no-data {
+                padding: 20px;
+                text-align: center;
+                color: #8899aa;
+                font-size: 11px;
+            }
 
             /* Signal List Styles */
             .ml-signals-section {
@@ -442,6 +676,10 @@ export class MLDashboard {
 
     _startPolling() {
         this._fetchStatus().finally(() => {
+            // Also refresh paper trading if that tab is active
+            if (this.activeMainTab === 'paper') {
+                this._fetchPaperTradingStatus();
+            }
             // Adaptive polling: 60s if error/offline, 30s if active
             const delay = this.status && this.status.error ? 60000 : 30000;
             this.pollTimeout = setTimeout(() => this._startPolling(), delay);
@@ -450,7 +688,12 @@ export class MLDashboard {
 
     _updateUI() {
         const badge = document.getElementById('mlBadge');
-        const stats = document.getElementById('mlStats');
+        const content = this.container.querySelector('#mlTabContent');
+
+        // Only update signals content if that tab is active
+        if (this.activeMainTab !== 'signals') return;
+
+        const stats = content;
 
         if (!this.status || this.status.error) {
             badge.textContent = 'Offline';
