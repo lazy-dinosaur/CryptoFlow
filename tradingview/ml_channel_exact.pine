@@ -1,0 +1,197 @@
+// ML Channel Detector - Exact Match with Python ML
+//@version=5
+indicator("ML Channel Exact", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// === INPUTS ===
+confirm_candles = input.int(3, "Confirm Candles", minval=1, maxval=10)
+touch_tolerance = input.float(0.4, "Touch Tolerance %", minval=0.1, maxval=2.0, step=0.1) / 100
+min_channel_width = input.float(0.8, "Min Channel Width %", minval=0.1, maxval=5.0, step=0.1) / 100
+max_channel_width = input.float(5.0, "Max Channel Width %", minval=1.0, maxval=10.0, step=0.1) / 100
+min_touches = input.int(2, "Min Touches for Confirm", minval=1, maxval=5)
+max_swing_points = input.int(30, "Max Swing Points", minval=5, maxval=50)
+max_candle_age = input.int(100, "Max Candle Age", minval=20, maxval=200)
+
+// === COLORS ===
+color_support = input.color(color.green, "Support Color")
+color_resistance = input.color(color.red, "Resistance Color")
+color_swing_high = input.color(color.red, "Swing High Marker")
+color_swing_low = input.color(color.green, "Swing Low Marker")
+show_swing_markers = input.bool(true, "Show Swing Markers")
+
+// === SWING POINT DETECTION ===
+var float potential_high_price = high
+var int potential_high_idx = bar_index
+var int candles_since_high = 0
+
+var float potential_low_price = low
+var int potential_low_idx = bar_index
+var int candles_since_low = 0
+
+var float[] swing_high_prices = array.new_float()
+var int[] swing_high_indices = array.new_int()
+var float[] swing_low_prices = array.new_float()
+var int[] swing_low_indices = array.new_int()
+
+// Detect swing highs
+if high > potential_high_price
+    potential_high_idx := bar_index
+    potential_high_price := high
+    candles_since_high := 0
+else
+    candles_since_high := candles_since_high + 1
+    if candles_since_high == confirm_candles
+        array.push(swing_high_prices, potential_high_price)
+        array.push(swing_high_indices, potential_high_idx)
+        if array.size(swing_high_prices) > max_swing_points
+            array.shift(swing_high_prices)
+            array.shift(swing_high_indices)
+        if show_swing_markers
+            label.new(potential_high_idx, potential_high_price, "H", color=color.new(color_swing_high, 70), style=label.style_label_down, textcolor=color_swing_high, size=size.tiny)
+
+if candles_since_high >= confirm_candles
+    potential_high_price := high
+    potential_high_idx := bar_index
+    candles_since_high := 0
+
+// Detect swing lows
+if low < potential_low_price
+    potential_low_idx := bar_index
+    potential_low_price := low
+    candles_since_low := 0
+else
+    candles_since_low := candles_since_low + 1
+    if candles_since_low == confirm_candles
+        array.push(swing_low_prices, potential_low_price)
+        array.push(swing_low_indices, potential_low_idx)
+        if array.size(swing_low_prices) > max_swing_points
+            array.shift(swing_low_prices)
+            array.shift(swing_low_indices)
+        if show_swing_markers
+            label.new(potential_low_idx, potential_low_price, "L", color=color.new(color_swing_low, 70), style=label.style_label_up, textcolor=color_swing_low, size=size.tiny)
+
+if candles_since_low >= confirm_candles
+    potential_low_price := low
+    potential_low_idx := bar_index
+    candles_since_low := 0
+
+// === TOUCH COUNT FUNCTIONS ===
+count_support_touches(float price) =>
+    cnt = 0
+    arr_len = array.size(swing_low_prices)
+    start_i = math.max(0, arr_len - max_swing_points)
+    for i = start_i to arr_len - 1
+        p = array.get(swing_low_prices, i)
+        idx = array.get(swing_low_indices, i)
+        if bar_index - idx <= max_candle_age
+            if math.abs(p - price) / price < touch_tolerance
+                cnt := cnt + 1
+    cnt
+
+count_resistance_touches(float price) =>
+    cnt = 0
+    arr_len = array.size(swing_high_prices)
+    start_i = math.max(0, arr_len - max_swing_points)
+    for i = start_i to arr_len - 1
+        p = array.get(swing_high_prices, i)
+        idx = array.get(swing_high_indices, i)
+        if bar_index - idx <= max_candle_age
+            if math.abs(p - price) / price < touch_tolerance
+                cnt := cnt + 1
+    cnt
+
+// === FIND BEST CHANNEL ===
+var float best_support = na
+var float best_resistance = na
+var int best_s_touches = 0
+var int best_r_touches = 0
+var int best_score = 0
+
+if barstate.islast
+    best_score := 0
+    best_support := na
+    best_resistance := na
+    best_s_touches := 0
+    best_r_touches := 0
+
+    high_size = array.size(swing_high_prices)
+    low_size = array.size(swing_low_prices)
+
+    if high_size > 0 and low_size > 0
+        for hi = math.max(0, high_size - max_swing_points) to high_size - 1
+            r_price = array.get(swing_high_prices, hi)
+            r_idx = array.get(swing_high_indices, hi)
+            if bar_index - r_idx > max_candle_age
+                continue
+            for li = math.max(0, low_size - max_swing_points) to low_size - 1
+                s_price = array.get(swing_low_prices, li)
+                s_idx = array.get(swing_low_indices, li)
+                if bar_index - s_idx > max_candle_age
+                    continue
+                if r_price > s_price
+                    width_pct = (r_price - s_price) / s_price
+                    if width_pct >= min_channel_width and width_pct <= max_channel_width
+                        if close >= s_price * 0.98 and close <= r_price * 1.02
+                            s_touches = count_support_touches(s_price)
+                            r_touches = count_resistance_touches(r_price)
+                            if s_touches >= min_touches and r_touches >= min_touches
+                                score = s_touches + r_touches
+                                if score > best_score
+                                    best_score := score
+                                    best_support := s_price
+                                    best_resistance := r_price
+                                    best_s_touches := s_touches
+                                    best_r_touches := r_touches
+
+// === DRAW CHANNEL ===
+var line support_line = na
+var line resistance_line = na
+var label channel_label = na
+
+if barstate.islast
+    if not na(support_line)
+        line.delete(support_line)
+    if not na(resistance_line)
+        line.delete(resistance_line)
+    if not na(channel_label)
+        label.delete(channel_label)
+
+    if not na(best_support) and not na(best_resistance)
+        width_pct = (best_resistance - best_support) / best_support * 100
+        support_line := line.new(bar_index - max_candle_age, best_support, bar_index + 10, best_support, color=color_support, width=2, style=line.style_solid)
+        resistance_line := line.new(bar_index - max_candle_age, best_resistance, bar_index + 10, best_resistance, color=color_resistance, width=2, style=line.style_solid)
+        label_text = "S:" + str.tostring(best_support, "#.0") + "(" + str.tostring(best_s_touches) + ") R:" + str.tostring(best_resistance, "#.0") + "(" + str.tostring(best_r_touches) + ") W:" + str.tostring(width_pct, "#.#") + "%"
+        channel_label := label.new(bar_index + 5, best_resistance, label_text, color=color.new(color.blue, 70), textcolor=color.white, style=label.style_label_left, size=size.small)
+
+// === INFO TABLE ===
+var table info_table = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 80))
+
+if barstate.islast
+    table.cell(info_table, 0, 0, "ML Channel", text_color=color.white, text_size=size.small)
+    table.cell(info_table, 1, 0, "Exact Match", text_color=color.yellow, text_size=size.small)
+    table.cell(info_table, 0, 1, "Confirm", text_color=color.gray, text_size=size.tiny)
+    table.cell(info_table, 1, 1, str.tostring(confirm_candles) + " bars", text_color=color.white, text_size=size.tiny)
+    table.cell(info_table, 0, 2, "Tolerance", text_color=color.gray, text_size=size.tiny)
+    table.cell(info_table, 1, 2, str.tostring(touch_tolerance * 100, "#.#") + "%", text_color=color.white, text_size=size.tiny)
+    table.cell(info_table, 0, 3, "Width", text_color=color.gray, text_size=size.tiny)
+    table.cell(info_table, 1, 3, str.tostring(min_channel_width * 100, "#.#") + "-" + str.tostring(max_channel_width * 100, "#") + "%", text_color=color.white, text_size=size.tiny)
+    table.cell(info_table, 0, 4, "Min Touch", text_color=color.gray, text_size=size.tiny)
+    table.cell(info_table, 1, 4, str.tostring(min_touches), text_color=color.white, text_size=size.tiny)
+    table.cell(info_table, 0, 5, "Swing H", text_color=color.gray, text_size=size.tiny)
+    table.cell(info_table, 1, 5, str.tostring(array.size(swing_high_prices)), text_color=color_swing_high, text_size=size.tiny)
+    table.cell(info_table, 0, 6, "Swing L", text_color=color.gray, text_size=size.tiny)
+    table.cell(info_table, 1, 6, str.tostring(array.size(swing_low_prices)), text_color=color_swing_low, text_size=size.tiny)
+    table.cell(info_table, 0, 7, "Channel", text_color=color.gray, text_size=size.tiny)
+    if not na(best_support)
+        table.cell(info_table, 1, 7, "CONFIRMED", text_color=color.green, text_size=size.tiny)
+    else
+        table.cell(info_table, 1, 7, "NONE", text_color=color.red, text_size=size.tiny)
+
+// === SIGNAL ALERTS ===
+support_touch = not na(best_support) and low <= best_support * (1 + touch_tolerance) and close > best_support
+resistance_touch = not na(best_resistance) and high >= best_resistance * (1 - touch_tolerance) and close < best_resistance
+
+plotshape(support_touch, title="Support Touch", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)
+plotshape(resistance_touch, title="Resistance Touch", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small)
+
+alertcondition(support_touch, title="Support Touch (LONG)", message="Price touched support - potential LONG entry")
+alertcondition(resistance_touch, title="Resistance Touch (SHORT)", message="Price touched resistance - potential SHORT entry")

@@ -163,7 +163,7 @@ def features_to_array(features_list):
     ] for f in features_list])
 
 
-def backtest(trades, entry_preds, label):
+def backtest(trades, entry_preds, label, exit_strategy='tp2'):
     """Run backtest with entry filter."""
     capital = 10000
     risk_pct = 0.015
@@ -177,6 +177,8 @@ def backtest(trades, entry_preds, label):
     trades_taken = 0
     trade_returns = []
 
+    pnl_key = f'pnl_{exit_strategy}'
+
     for trade, take_trade in zip(trades, entry_preds):
         if take_trade == SKIP:
             continue
@@ -189,7 +191,7 @@ def backtest(trades, entry_preds, label):
         leverage = min(risk_pct / sl_dist, max_leverage)
         position = capital * leverage
 
-        pnl = position * trade['pnl_tp2']  # 고정 TP2 전략
+        pnl = position * trade[pnl_key]
         fees = position * fee_pct * 2
         net = pnl - fees
 
@@ -308,6 +310,19 @@ def main():
 
     entry_preds_70 = (entry_probs >= 0.7).astype(int)
     backtest(oos_trades, entry_preds_70, "ML Entry (threshold=0.7)")
+
+    # TP1 vs TP2 비교
+    print("\n" + "="*60)
+    print("  EXIT STRATEGY COMPARISON - No ML")
+    print("="*60)
+    backtest(oos_trades, baseline_preds, "No ML + TP1 (100%)", exit_strategy='tp1')
+    backtest(oos_trades, baseline_preds, "No ML + TP2 (50%+50%)", exit_strategy='tp2')
+
+    print("\n" + "="*60)
+    print("  EXIT STRATEGY COMPARISON - ML Entry 0.7")
+    print("="*60)
+    backtest(oos_trades, entry_preds_70, "ML 0.7 + TP1 (100%)", exit_strategy='tp1')
+    backtest(oos_trades, entry_preds_70, "ML 0.7 + TP2 (50%+50%)", exit_strategy='tp2')
 
 
 if __name__ == "__main__":

@@ -632,7 +632,7 @@ class MLPaperTradingService:
             for trade in trades_to_remove:
                 state.active_trades.remove(trade)
 
-    def _find_swing_points(self, candles: pd.DataFrame, confirm_candles: int = 2):
+    def _find_swing_points(self, candles: pd.DataFrame, confirm_candles: int = 3):
         """Find swing highs and lows."""
         if len(candles) < confirm_candles + 1:
             return [], []

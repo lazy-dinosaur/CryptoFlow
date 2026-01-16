@@ -110,7 +110,7 @@ class FakeoutSignal:
 
 
 def build_htf_channels(htf_candles: pd.DataFrame,
-                       max_channel_width: float = 0.05,
+                       max_channel_width: float = 0.05,  # 5%
                        min_channel_width: float = 0.008,
                        touch_threshold: float = 0.004) -> Tuple[Dict[int, Channel], List[FakeoutSignal]]:
     """
