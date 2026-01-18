@@ -439,6 +439,8 @@ export class MLDashboard {
             
             .ml-content {
                 padding: 12px;
+                max-height: 70vh;
+                overflow-y: auto;
             }
             
             .ml-stats {
