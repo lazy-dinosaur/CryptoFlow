@@ -14,3 +14,15 @@ npm-debug.log
 *.db
 *.db-journal
 *.db-wal
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Backtest data/results
+backtest/data/
+backtest/results/
+
+# Research
+research/

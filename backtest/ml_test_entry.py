@@ -49,7 +49,7 @@ def collect_trades(df_1h, df_15m):
         mid_price = (channel.resistance + channel.support) / 2
 
         # Fakeout
-        fakeout_signal = htf_fakeout_map.get(htf_idx)
+        fakeout_signal = htf_fakeout_map.get(htf_idx - 1)  # Fix lookahead bias
         if fakeout_signal and i % tf_ratio == 0:
             f_channel = fakeout_signal.channel
             f_mid = (f_channel.resistance + f_channel.support) / 2
@@ -168,7 +168,7 @@ def backtest(trades, entry_preds, label, exit_strategy='tp2'):
     capital = 10000
     risk_pct = 0.015
     max_leverage = 15
-    fee_pct = 0.0004
+    fee_pct = 0.0005  # 0.05% (일반 Taker 기준)
 
     wins = 0
     losses = 0
@@ -249,10 +249,10 @@ def main():
     # Split IS/OOS
     years = np.array([t['timestamp'].year for t in trade_data_list])
     is_mask = np.isin(years, [2022, 2023])
-    oos_mask = np.isin(years, [2024, 2025])
+    oos_mask = np.isin(years, [2024])  # 2024년만
 
     print(f"\n  IS (2022-2023): {is_mask.sum()} trades")
-    print(f"  OOS (2024-2025): {oos_mask.sum()} trades")
+    print(f"  OOS (2024): {oos_mask.sum()} trades")
 
     # Prepare data
     X = features_to_array(features_list)

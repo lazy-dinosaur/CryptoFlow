@@ -411,7 +411,7 @@ def simulate_pyramid_strategy(htf_candles: pd.DataFrame,
         current_low = ltf_lows[i]
 
         htf_idx = i // tf_ratio
-        channel = htf_channel_map.get(htf_idx)
+        channel = htf_channel_map.get(htf_idx - 1)  # Fix lookahead bias
 
         # Update active positions
         for pos in active_positions[:]:
@@ -574,7 +574,7 @@ def simulate_pyramid_strategy(htf_candles: pd.DataFrame,
                 current_channel_key = channel_key
 
         # Fakeout entry
-        fakeout_signal = htf_fakeout_map.get(htf_idx)
+        fakeout_signal = htf_fakeout_map.get(htf_idx - 1)  # Fix lookahead bias
         if fakeout_signal and i % tf_ratio == 0:
             f_channel = fakeout_signal.channel
             f_mid = (f_channel.resistance + f_channel.support) / 2

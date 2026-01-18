@@ -134,7 +134,7 @@ def collect_entry_training_data(
         current_low = ltf_lows[i]
 
         htf_idx = i // tf_ratio
-        channel = htf_channel_map.get(htf_idx)
+        channel = htf_channel_map.get(htf_idx - 1)  # Fix lookahead bias
 
         if not channel:
             continue
@@ -142,7 +142,7 @@ def collect_entry_training_data(
         mid_price = (channel.resistance + channel.support) / 2
 
         # Check for fakeout
-        fakeout_signal = htf_fakeout_map.get(htf_idx)
+        fakeout_signal = htf_fakeout_map.get(htf_idx - 1)  # Fix lookahead bias
         if fakeout_signal and i % tf_ratio == 0:
             f_channel = fakeout_signal.channel
             f_mid = (f_channel.resistance + f_channel.support) / 2

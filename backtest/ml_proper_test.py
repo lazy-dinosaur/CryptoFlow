@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-Combined ML Entry + Exit System
+Proper IS/OOS Test - No Data Leakage
 
-Tests:
-1. ML Entry alone (filter signals)
-2. ML Exit alone (optimize exit)
-3. ML Entry + Exit combined
+Train ONLY on 2024 data
+Test ONLY on 2025 data (never seen during training)
 """
 
 import os
 import sys
 import numpy as np
 import pandas as pd
-from typing import List
+from typing import List, Tuple
 from tqdm import tqdm
 import pickle
+
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import classification_report, accuracy_score
 
 sys.path.insert(0, os.path.dirname(__file__))
 from parse_data import load_candles
@@ -26,7 +28,7 @@ from ml_exit import (
 from ml_entry import simulate_trade_for_entry_label, TAKE, SKIP
 
 
-def collect_combined_data(
+def collect_all_data(
     htf_candles: pd.DataFrame,
     ltf_candles: pd.DataFrame,
     htf_tf: str = "1h",
@@ -34,7 +36,7 @@ def collect_combined_data(
     touch_threshold: float = 0.003,
     sl_buffer_pct: float = 0.0008
 ):
-    """Collect data for both entry and exit models."""
+    """Collect all trade data with features and labels."""
 
     print("Building HTF channels...")
     htf_channel_map, htf_fakeout_signals = build_htf_channels(htf_candles)
@@ -52,7 +54,7 @@ def collect_combined_data(
 
     htf_fakeout_map = {fs.htf_idx: fs for fs in htf_fakeout_signals}
 
-    print(f"\nScanning {len(ltf_candles)} LTF candles for setups...")
+    print(f"\nScanning {len(ltf_candles)} LTF candles...")
 
     for i in tqdm(range(50, len(ltf_candles) - 200)):
         current_close = ltf_closes[i]
@@ -86,22 +88,25 @@ def collect_combined_data(
                             ltf_candles, i, f_channel, 'LONG', 'FAKEOUT', fakeout_signal.extreme
                         )
 
-                        # Get entry label (win/loss)
                         is_win, base_pnl = simulate_trade_for_entry_label(
                             ltf_candles, i, 'LONG', entry_price, sl_price, tp1_price, tp2_price
                         )
 
-                        # Get optimal exit
                         exit_data, optimal_exit = simulate_trade_with_optimal_exit(
                             ltf_candles, i, 'LONG', entry_price, sl_price, tp1_price, tp2_price,
                             f_channel, fakeout_signal.extreme, 'FAKEOUT'
                         )
 
+                        # Get timestamp for year split
+                        timestamp = ltf_candles.index[i]
+
                         features_list.append(features)
                         trade_data_list.append({
                             **exit_data,
                             'is_win': is_win,
-                            'entry_label': TAKE if is_win else SKIP
+                            'entry_label': TAKE if is_win else SKIP,
+                            'exit_label': optimal_exit,
+                            'timestamp': timestamp
                         })
                         traded_entries.add(trade_key)
 
@@ -125,11 +130,15 @@ def collect_combined_data(
                             f_channel, fakeout_signal.extreme, 'FAKEOUT'
                         )
 
+                        timestamp = ltf_candles.index[i]
+
                         features_list.append(features)
                         trade_data_list.append({
                             **exit_data,
                             'is_win': is_win,
-                            'entry_label': TAKE if is_win else SKIP
+                            'entry_label': TAKE if is_win else SKIP,
+                            'exit_label': optimal_exit,
+                            'timestamp': timestamp
                         })
                         traded_entries.add(trade_key)
 
@@ -157,11 +166,15 @@ def collect_combined_data(
                     channel, None, 'BOUNCE'
                 )
 
+                timestamp = ltf_candles.index[i]
+
                 features_list.append(features)
                 trade_data_list.append({
                     **exit_data,
                     'is_win': is_win,
-                    'entry_label': TAKE if is_win else SKIP
+                    'entry_label': TAKE if is_win else SKIP,
+                    'exit_label': optimal_exit,
+                    'timestamp': timestamp
                 })
                 traded_entries.add(trade_key)
 
@@ -184,229 +197,105 @@ def collect_combined_data(
                     channel, None, 'BOUNCE'
                 )
 
+                timestamp = ltf_candles.index[i]
+
                 features_list.append(features)
                 trade_data_list.append({
                     **exit_data,
                     'is_win': is_win,
-                    'entry_label': TAKE if is_win else SKIP
+                    'entry_label': TAKE if is_win else SKIP,
+                    'exit_label': optimal_exit,
+                    'timestamp': timestamp
                 })
                 traded_entries.add(trade_key)
 
     return features_list, trade_data_list
 
 
-def backtest_baseline(trade_data_list: List[dict], label: str = ""):
-    """Baseline: No ML, fixed TP2 exit."""
-    capital = 10000
-    risk_pct = 0.015
-    max_leverage = 15
-    fee_pct = 0.0004
+def train_models_on_is(X_is, entry_labels_is, exit_labels_is):
+    """Train both models ONLY on IS (2024) data."""
 
-    peak = capital
-    max_dd = 0
-    wins = 0
-    losses = 0
+    print("\n" + "="*60)
+    print("  Training Models on IS (2024) ONLY")
+    print("="*60)
 
-    for trade in trade_data_list:
-        sl_dist = abs(trade['entry'] - trade['sl']) / trade['entry']
-        if sl_dist <= 0:
-            continue
+    # Entry model
+    print(f"\nEntry Model:")
+    print(f"  Training samples: {len(X_is)}")
+    print(f"  TAKE: {np.sum(entry_labels_is == TAKE)} ({np.sum(entry_labels_is == TAKE)/len(entry_labels_is)*100:.1f}%)")
+    print(f"  SKIP: {np.sum(entry_labels_is == SKIP)} ({np.sum(entry_labels_is == SKIP)/len(entry_labels_is)*100:.1f}%)")
 
-        leverage = min(risk_pct / sl_dist, max_leverage)
-        position_value = capital * leverage
+    entry_scaler = StandardScaler()
+    X_is_scaled = entry_scaler.fit_transform(X_is)
 
-        gross_pnl = position_value * trade['pnl_tp2']  # Fixed TP2 exit
-        fees = position_value * fee_pct * 2
-        net_pnl = gross_pnl - fees
+    entry_model = RandomForestClassifier(
+        n_estimators=200,
+        max_depth=6,
+        min_samples_split=3,
+        min_samples_leaf=2,
+        class_weight='balanced',
+        random_state=42,
+        n_jobs=-1
+    )
+    entry_model.fit(X_is_scaled, entry_labels_is)
 
-        capital += net_pnl
-        capital = max(capital, 0)
+    entry_train_acc = accuracy_score(entry_labels_is, entry_model.predict(X_is_scaled))
+    print(f"  Training Accuracy: {entry_train_acc:.3f}")
 
-        if net_pnl > 0:
-            wins += 1
-        else:
-            losses += 1
+    # Exit model
+    print(f"\nExit Model:")
+    print(f"  Training samples: {len(X_is)}")
+    for label_id, name in EXIT_NAMES.items():
+        count = np.sum(exit_labels_is == label_id)
+        print(f"  {name}: {count} ({count/len(exit_labels_is)*100:.1f}%)")
 
-        if capital > peak:
-            peak = capital
-        dd = (peak - capital) / peak if peak > 0 else 0
-        max_dd = max(max_dd, dd)
+    exit_scaler = StandardScaler()
+    X_is_exit_scaled = exit_scaler.fit_transform(X_is)
 
-        if capital <= 0:
-            break
+    exit_model = RandomForestClassifier(
+        n_estimators=200,
+        max_depth=6,
+        min_samples_split=3,
+        min_samples_leaf=2,
+        class_weight='balanced',
+        random_state=42,
+        n_jobs=-1
+    )
+    exit_model.fit(X_is_exit_scaled, exit_labels_is)
 
-    total_return = (capital - 10000) / 10000 * 100
-    win_rate = wins / (wins + losses) * 100 if (wins + losses) > 0 else 0
+    exit_train_acc = accuracy_score(exit_labels_is, exit_model.predict(X_is_exit_scaled))
+    print(f"  Training Accuracy: {exit_train_acc:.3f}")
 
-    print(f"\n{label}:")
-    print(f"  Trades: {len(trade_data_list)}")
-    print(f"  Return: {total_return:+.1f}%, Max DD: {max_dd*100:.1f}%")
-    print(f"  Win Rate: {win_rate:.1f}% ({wins}W / {losses}L)")
-    print(f"  Final: ${capital:,.2f}")
-
-    return capital
+    return entry_model, entry_scaler, exit_model, exit_scaler
 
 
-def backtest_ml_entry_only(
+def backtest(
     trade_data_list: List[dict],
     features_list: List[TradeFeatures],
-    entry_model,
-    entry_scaler,
-    threshold: float = 0.5,
-    label: str = ""
-):
-    """ML Entry filter + Fixed TP2 exit."""
-    X = features_to_array(features_list)
-    X_scaled = entry_scaler.transform(X)
-
-    entry_probs = entry_model.predict_proba(X_scaled)[:, 1]
-    entry_preds = (entry_probs >= threshold).astype(int)
-
-    capital = 10000
-    risk_pct = 0.015
-    max_leverage = 15
-    fee_pct = 0.0004
-
-    peak = capital
-    max_dd = 0
-    wins = 0
-    losses = 0
-    trades_taken = 0
-
-    for i, (trade, take_trade) in enumerate(zip(trade_data_list, entry_preds)):
-        if take_trade == SKIP:
-            continue
-
-        trades_taken += 1
-        sl_dist = abs(trade['entry'] - trade['sl']) / trade['entry']
-        if sl_dist <= 0:
-            continue
-
-        leverage = min(risk_pct / sl_dist, max_leverage)
-        position_value = capital * leverage
-
-        gross_pnl = position_value * trade['pnl_tp2']  # Fixed TP2
-        fees = position_value * fee_pct * 2
-        net_pnl = gross_pnl - fees
-
-        capital += net_pnl
-        capital = max(capital, 0)
-
-        if net_pnl > 0:
-            wins += 1
-        else:
-            losses += 1
-
-        if capital > peak:
-            peak = capital
-        dd = (peak - capital) / peak if peak > 0 else 0
-        max_dd = max(max_dd, dd)
-
-        if capital <= 0:
-            break
-
-    total_return = (capital - 10000) / 10000 * 100
-    win_rate = wins / (wins + losses) * 100 if (wins + losses) > 0 else 0
-
-    print(f"\n{label}:")
-    print(f"  Signals: {len(trade_data_list)}, Taken: {trades_taken}")
-    print(f"  Return: {total_return:+.1f}%, Max DD: {max_dd*100:.1f}%")
-    print(f"  Win Rate: {win_rate:.1f}% ({wins}W / {losses}L)")
-    print(f"  Final: ${capital:,.2f}")
-
-    return capital
-
-
-def backtest_ml_exit_only(
-    trade_data_list: List[dict],
-    features_list: List[TradeFeatures],
-    exit_model,
-    exit_scaler,
-    label: str = ""
-):
-    """No entry filter + ML Exit."""
-    X = features_to_array(features_list)
-    X_scaled = exit_scaler.transform(X)
-
-    exit_preds = exit_model.predict(X_scaled)
-
-    capital = 10000
-    risk_pct = 0.015
-    max_leverage = 15
-    fee_pct = 0.0004
-
-    peak = capital
-    max_dd = 0
-    wins = 0
-    losses = 0
-
-    exit_stats = {EXIT_TP1: 0, EXIT_TP2: 0, HOLD_TP3: 0}
-
-    for i, (trade, exit_pred) in enumerate(zip(trade_data_list, exit_preds)):
-        exit_stats[exit_pred] += 1
-
-        sl_dist = abs(trade['entry'] - trade['sl']) / trade['entry']
-        if sl_dist <= 0:
-            continue
-
-        leverage = min(risk_pct / sl_dist, max_leverage)
-        position_value = capital * leverage
-
-        pnl_key = {EXIT_TP1: 'pnl_tp1', EXIT_TP2: 'pnl_tp2', HOLD_TP3: 'pnl_tp3'}[exit_pred]
-        gross_pnl = position_value * trade[pnl_key]
-        fees = position_value * fee_pct * 2
-        net_pnl = gross_pnl - fees
-
-        capital += net_pnl
-        capital = max(capital, 0)
-
-        if net_pnl > 0:
-            wins += 1
-        else:
-            losses += 1
-
-        if capital > peak:
-            peak = capital
-        dd = (peak - capital) / peak if peak > 0 else 0
-        max_dd = max(max_dd, dd)
-
-        if capital <= 0:
-            break
-
-    total_return = (capital - 10000) / 10000 * 100
-    win_rate = wins / (wins + losses) * 100 if (wins + losses) > 0 else 0
-
-    print(f"\n{label}:")
-    print(f"  Trades: {len(trade_data_list)}")
-    print(f"  Exit Distribution: TP1={exit_stats[EXIT_TP1]}, TP2={exit_stats[EXIT_TP2]}, TP3={exit_stats[HOLD_TP3]}")
-    print(f"  Return: {total_return:+.1f}%, Max DD: {max_dd*100:.1f}%")
-    print(f"  Win Rate: {win_rate:.1f}% ({wins}W / {losses}L)")
-    print(f"  Final: ${capital:,.2f}")
-
-    return capital
-
-
-def backtest_ml_combined(
-    trade_data_list: List[dict],
-    features_list: List[TradeFeatures],
-    entry_model,
-    entry_scaler,
-    exit_model,
-    exit_scaler,
+    entry_model=None,
+    entry_scaler=None,
+    exit_model=None,
+    exit_scaler=None,
     entry_threshold: float = 0.5,
     label: str = ""
 ):
-    """ML Entry + ML Exit combined."""
+    """Run backtest with optional ML models."""
+
     X = features_to_array(features_list)
 
-    # Entry predictions
-    X_entry_scaled = entry_scaler.transform(X)
-    entry_probs = entry_model.predict_proba(X_entry_scaled)[:, 1]
-    entry_preds = (entry_probs >= entry_threshold).astype(int)
+    # Get predictions if models provided
+    if entry_model and entry_scaler:
+        X_entry_scaled = entry_scaler.transform(X)
+        entry_probs = entry_model.predict_proba(X_entry_scaled)[:, 1]
+        entry_preds = (entry_probs >= entry_threshold).astype(int)
+    else:
+        entry_preds = np.ones(len(X), dtype=int)  # Take all
 
-    # Exit predictions
-    X_exit_scaled = exit_scaler.transform(X)
-    exit_preds = exit_model.predict(X_exit_scaled)
+    if exit_model and exit_scaler:
+        X_exit_scaled = exit_scaler.transform(X)
+        exit_preds = exit_model.predict(X_exit_scaled)
+    else:
+        exit_preds = np.full(len(X), EXIT_TP2)  # Fixed TP2
 
     capital = 10000
     risk_pct = 0.015
@@ -418,15 +307,12 @@ def backtest_ml_combined(
     wins = 0
     losses = 0
     trades_taken = 0
-
-    exit_stats = {EXIT_TP1: 0, EXIT_TP2: 0, HOLD_TP3: 0}
 
     for i, (trade, take_trade, exit_pred) in enumerate(zip(trade_data_list, entry_preds, exit_preds)):
         if take_trade == SKIP:
             continue
 
         trades_taken += 1
-        exit_stats[exit_pred] += 1
 
         sl_dist = abs(trade['entry'] - trade['sl']) / trade['entry']
         if sl_dist <= 0:
@@ -460,20 +346,19 @@ def backtest_ml_combined(
     win_rate = wins / (wins + losses) * 100 if (wins + losses) > 0 else 0
 
     print(f"\n{label}:")
-    print(f"  Signals: {len(trade_data_list)}, Taken: {trades_taken}")
-    print(f"  Exit Distribution: TP1={exit_stats[EXIT_TP1]}, TP2={exit_stats[EXIT_TP2]}, TP3={exit_stats[HOLD_TP3]}")
+    print(f"  Trades: {trades_taken}")
     print(f"  Return: {total_return:+.1f}%, Max DD: {max_dd*100:.1f}%")
     print(f"  Win Rate: {win_rate:.1f}% ({wins}W / {losses}L)")
     print(f"  Final: ${capital:,.2f}")
 
-    return capital
+    return capital, trades_taken, wins, losses
 
 
 def main():
     print("""
 ╔═══════════════════════════════════════════════════════════╗
-║   Combined ML Entry + Exit Test                           ║
-║   Compare: Baseline vs Entry vs Exit vs Combined          ║
+║   PROPER IS/OOS TEST - NO DATA LEAKAGE                    ║
+║   Train on 2024 ONLY, Test on 2025 ONLY                   ║
 ╚═══════════════════════════════════════════════════════════╝
 """)
 
@@ -491,84 +376,82 @@ def main():
     print(f"  Loaded {len(ltf_candles):,} candles")
     print(f"  Date range: {ltf_candles.index[0]} ~ {ltf_candles.index[-1]}\n")
 
-    # Load models
-    print("Loading ML models...")
-    models_dir = os.path.join(os.path.dirname(__file__), 'models')
-
-    with open(os.path.join(models_dir, 'entry_model.pkl'), 'rb') as f:
-        entry_data = pickle.load(f)
-        entry_model = entry_data['model']
-        entry_scaler = entry_data['scaler']
-
-    with open(os.path.join(models_dir, 'exit_model.pkl'), 'rb') as f:
-        exit_data = pickle.load(f)
-        exit_model = exit_data['model']
-        exit_scaler = exit_data['scaler']
-
-    print("  Entry model loaded")
-    print("  Exit model loaded")
-
-    # Collect data
-    print("\n" + "="*60)
+    # Collect all data
+    print("="*60)
     print("  Collecting Trade Data")
     print("="*60)
 
-    features_list, trade_data_list = collect_combined_data(
-        htf_candles, ltf_candles, htf, ltf
-    )
+    features_list, trade_data_list = collect_all_data(htf_candles, ltf_candles, htf, ltf)
 
     print(f"\nTotal samples: {len(features_list)}")
 
-    # Split by year
-    trade_df = pd.DataFrame(trade_data_list)
-    trade_df['time'] = ltf_candles.index[trade_df['idx'].values]
-    trade_df['year'] = pd.to_datetime(trade_df['time']).dt.year
+    # Split by year - STRICT
+    years = [pd.to_datetime(t['timestamp']).year for t in trade_data_list]
+    # IS: 2022-2023, OOS: 2024-2025
+    is_mask = np.array([y in [2022, 2023] for y in years])
+    oos_mask = np.array([y in [2024, 2025] for y in years])
 
-    oos_mask = trade_df['year'] == 2025
+    print(f"\nIS (2024): {np.sum(is_mask)} trades")
+    print(f"OOS (2025): {np.sum(oos_mask)} trades")
 
-    oos_trades = [trade_data_list[i] for i in range(len(trade_data_list)) if oos_mask.iloc[i]]
-    oos_features = [features_list[i] for i in range(len(features_list)) if oos_mask.iloc[i]]
+    # Prepare data
+    X = features_to_array(features_list)
+    entry_labels = np.array([t['entry_label'] for t in trade_data_list])
+    exit_labels = np.array([t['exit_label'] for t in trade_data_list])
 
-    # Run backtests
+    X_is = X[is_mask]
+    entry_labels_is = entry_labels[is_mask]
+    exit_labels_is = exit_labels[is_mask]
+
+    X_oos = X[oos_mask]
+    oos_trades = [trade_data_list[i] for i in range(len(trade_data_list)) if oos_mask[i]]
+    oos_features = [features_list[i] for i in range(len(features_list)) if oos_mask[i]]
+
+    # Check if we have enough IS data
+    if len(X_is) < 10:
+        print(f"\n⚠️  WARNING: Only {len(X_is)} IS samples - too few for reliable ML!")
+        print("   Results may not be meaningful.\n")
+
+    # Train models on IS only
+    entry_model, entry_scaler, exit_model, exit_scaler = train_models_on_is(
+        X_is, entry_labels_is, exit_labels_is
+    )
+
+    # Test on OOS
     print("\n" + "="*60)
-    print("  OUT-OF-SAMPLE RESULTS (2025)")
+    print("  OOS RESULTS (2025) - NEVER SEEN DURING TRAINING")
     print("="*60)
 
     print("\n--- 1. Baseline (No ML) ---")
-    baseline_capital = backtest_baseline(oos_trades, "  Baseline (Fixed TP2)")
+    backtest(oos_trades, oos_features, label="  Baseline")
 
-    print("\n--- 2. ML Entry Only ---")
-    entry_capital = backtest_ml_entry_only(
+    print("\n--- 2. ML Entry Only (trained on 2024) ---")
+    backtest(
         oos_trades, oos_features,
-        entry_model, entry_scaler,
-        threshold=0.5,
-        label="  ML Entry (threshold=0.5)"
+        entry_model=entry_model,
+        entry_scaler=entry_scaler,
+        entry_threshold=0.5,
+        label="  ML Entry"
     )
 
-    print("\n--- 3. ML Exit Only ---")
-    exit_capital = backtest_ml_exit_only(
+    print("\n--- 3. ML Exit Only (trained on 2024) ---")
+    backtest(
         oos_trades, oos_features,
-        exit_model, exit_scaler,
+        exit_model=exit_model,
+        exit_scaler=exit_scaler,
         label="  ML Exit"
     )
 
-    print("\n--- 4. ML Entry + Exit Combined ---")
-    combined_capital = backtest_ml_combined(
+    print("\n--- 4. ML Combined (trained on 2024) ---")
+    backtest(
         oos_trades, oos_features,
-        entry_model, entry_scaler,
-        exit_model, exit_scaler,
+        entry_model=entry_model,
+        entry_scaler=entry_scaler,
+        exit_model=exit_model,
+        exit_scaler=exit_scaler,
         entry_threshold=0.5,
-        label="  ML Entry + Exit ⭐"
+        label="  ML Combined ⭐"
     )
-
-    # Summary
-    print("\n" + "="*60)
-    print("  SUMMARY (OOS 2025)")
-    print("="*60)
-    print(f"\n  Baseline:      ${baseline_capital:>12,.2f} ({(baseline_capital-10000)/100:+.0f}%)")
-    print(f"  ML Entry:      ${entry_capital:>12,.2f} ({(entry_capital-10000)/100:+.0f}%)")
-    print(f"  ML Exit:       ${exit_capital:>12,.2f} ({(exit_capital-10000)/100:+.0f}%)")
-    print(f"  ML Combined:   ${combined_capital:>12,.2f} ({(combined_capital-10000)/100:+.0f}%) ⭐")
 
 
 if __name__ == "__main__":

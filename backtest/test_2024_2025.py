@@ -115,7 +115,7 @@ def main():
         mid_price = (channel.resistance + channel.support) / 2
 
         # Fakeout 체크
-        fakeout_signal = htf_fakeout_map.get(htf_idx)
+        fakeout_signal = htf_fakeout_map.get(htf_idx - 1)  # Fix lookahead bias
         if fakeout_signal and i % tf_ratio == 0:
             f_channel = fakeout_signal.channel
             f_mid = (f_channel.resistance + f_channel.support) / 2

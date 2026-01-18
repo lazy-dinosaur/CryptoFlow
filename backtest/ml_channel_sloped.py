@@ -354,7 +354,7 @@ def collect_sloped_setups(htf_candles: pd.DataFrame,
         current_low = ltf_lows[i]
 
         htf_idx = i // tf_ratio
-        channel = htf_channel_map.get(htf_idx)
+        channel = htf_channel_map.get(htf_idx - 1)  # Fix lookahead bias
 
         if not channel:
             continue

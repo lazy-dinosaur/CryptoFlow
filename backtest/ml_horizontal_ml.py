@@ -1,37 +1,82 @@
 #!/usr/bin/env python3
 """
-ML Final Combined Test
+Horizontal Channel Strategy with ML Entry/Exit
+
+새로운 채널 감지 로직:
+1. 스윙 감지: pivothigh 스타일 (양쪽 N개 캔들 비교)
+2. 저장: 최근 3개 스윙 하이/로우만
+3. 채널 조건: 2개가 수평(tolerance 이내)이면 채널 형성
+4. 채널 높이: 0.5% 이상
+
+ML 전략:
 - ML Entry (threshold=0.7): 저품질 신호 필터링
 - ML Dynamic Exit: TP1 도달 시 청산 vs 홀딩 결정
 - Train: 2022-2023 | Test: 2024-2025
-
-실행: python ml_final_combined.py
 """
 
+import os
+import sys
 import numpy as np
 import pandas as pd
+from dataclasses import dataclass
+from typing import List, Dict, Tuple, Optional
+from tqdm import tqdm
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.preprocessing import StandardScaler
+
+sys.path.insert(0, os.path.dirname(__file__))
 from parse_data import load_candles
-from ml_channel_proper_mtf import build_htf_channels
-from ml_exit import extract_features
-from ml_entry import simulate_trade_for_entry_label, TAKE, SKIP
-from tqdm import tqdm
-from dataclasses import dataclass
-from typing import Optional, Tuple, List
 
-# Entry labels
-ENTRY_TAKE = 1
-ENTRY_SKIP = 0
 
-# Exit labels
+# Labels
+TAKE = 1
+SKIP = 0
 EXIT_AT_TP1 = 0
 HOLD_FOR_TP2 = 1
 
 
 @dataclass
+class SwingPoint:
+    idx: int
+    price: float
+    type: str  # 'high' or 'low'
+
+
+@dataclass
+class Channel:
+    support: float
+    support_idx: int
+    resistance: float
+    resistance_idx: int
+    start_idx: int
+
+
+@dataclass
+class EntryFeatures:
+    channel_width_pct: float
+    price_in_channel_pct: float
+    volume_ratio: float
+    delta_ratio: float
+    cvd_recent: float
+    volume_ma_20: float
+    delta_ma_20: float
+    atr_14: float
+    atr_ratio: float
+    momentum_5: float
+    momentum_20: float
+    rsi_14: float
+    is_bounce: int
+    is_long: int
+    body_size_pct: float
+    wick_ratio: float
+    is_bullish: int
+    hour: int
+    day_of_week: int
+    fakeout_depth_pct: float
+
+
+@dataclass
 class DynamicExitFeatures:
-    """TP1 도달 시점에서 수집하는 피처"""
     candles_to_tp1: int
     time_to_tp1_minutes: float
     delta_during_trade: float
@@ -51,6 +96,141 @@ class DynamicExitFeatures:
     is_fakeout: int
 
 
+def find_pivot_swing_points(candles: pd.DataFrame, swing_len: int = 3) -> Tuple[List[SwingPoint], List[SwingPoint]]:
+    """
+    Find swing highs and lows using pivot method (both sides comparison).
+    Similar to TradingView's ta.pivothigh/ta.pivotlow.
+    """
+    highs = candles['high'].values
+    lows = candles['low'].values
+
+    swing_highs = []
+    swing_lows = []
+
+    for i in range(swing_len, len(candles) - swing_len):
+        # Check swing high
+        is_swing_high = True
+        for j in range(1, swing_len + 1):
+            if highs[i] <= highs[i - j] or highs[i] <= highs[i + j]:
+                is_swing_high = False
+                break
+
+        if is_swing_high:
+            swing_highs.append(SwingPoint(idx=i, price=highs[i], type='high'))
+
+        # Check swing low
+        is_swing_low = True
+        for j in range(1, swing_len + 1):
+            if lows[i] >= lows[i - j] or lows[i] >= lows[i + j]:
+                is_swing_low = False
+                break
+
+        if is_swing_low:
+            swing_lows.append(SwingPoint(idx=i, price=lows[i], type='low'))
+
+    return swing_highs, swing_lows
+
+
+def build_horizontal_channels(htf_candles: pd.DataFrame,
+                               swing_len: int = 3,
+                               tolerance: float = 0.005,
+                               min_channel_height: float = 0.005) -> Dict[int, Channel]:
+    """
+    Build horizontal channels using pivot swing points.
+    """
+    swing_highs, swing_lows = find_pivot_swing_points(htf_candles, swing_len)
+
+    print(f"  HTF Swing Highs: {len(swing_highs)}")
+    print(f"  HTF Swing Lows: {len(swing_lows)}")
+
+    closes = htf_candles['close'].values
+    htf_channel_map: Dict[int, Channel] = {}
+
+    recent_highs: List[SwingPoint] = []
+    recent_lows: List[SwingPoint] = []
+
+    # Build map of when swings are confirmed (at idx + swing_len)
+    high_confirm_map = {sh.idx + swing_len: sh for sh in swing_highs}
+    low_confirm_map = {sl.idx + swing_len: sl for sl in swing_lows}
+
+    channels_found = 0
+
+    for i in range(len(htf_candles)):
+        current_close = closes[i]
+
+        # Check if new swing point confirmed at this index
+        if i in high_confirm_map:
+            sh = high_confirm_map[i]
+            recent_highs.insert(0, sh)
+            if len(recent_highs) > 3:
+                recent_highs.pop()
+
+        if i in low_confirm_map:
+            sl = low_confirm_map[i]
+            recent_lows.insert(0, sl)
+            if len(recent_lows) > 3:
+                recent_lows.pop()
+
+        channel = None
+
+        # Case 1: 2 lows are horizontal + 1 high
+        if len(recent_lows) >= 2 and len(recent_highs) >= 1:
+            l1 = recent_lows[0]
+            l2 = recent_lows[1]
+            h1 = recent_highs[0]
+
+            low_avg = (l1.price + l2.price) / 2
+            low_diff = abs(l1.price - l2.price) / low_avg
+
+            if low_diff <= tolerance:
+                support_price = low_avg
+                resistance_price = h1.price
+                channel_height = (resistance_price - support_price) / support_price
+
+                if channel_height > min_channel_height:
+                    start_bar = min(l2.idx, h1.idx)
+                    channel = Channel(
+                        support=support_price,
+                        support_idx=l1.idx,
+                        resistance=resistance_price,
+                        resistance_idx=h1.idx,
+                        start_idx=start_bar
+                    )
+
+        # Case 2: 2 highs are horizontal + 1 low
+        if channel is None and len(recent_highs) >= 2 and len(recent_lows) >= 1:
+            h1 = recent_highs[0]
+            h2 = recent_highs[1]
+            l1 = recent_lows[0]
+
+            high_avg = (h1.price + h2.price) / 2
+            high_diff = abs(h1.price - h2.price) / high_avg
+
+            if high_diff <= tolerance:
+                resistance_price = high_avg
+                support_price = l1.price
+                channel_height = (resistance_price - support_price) / support_price
+
+                if channel_height > min_channel_height:
+                    start_bar = min(h2.idx, l1.idx)
+                    channel = Channel(
+                        support=support_price,
+                        support_idx=l1.idx,
+                        resistance=resistance_price,
+                        resistance_idx=h1.idx,
+                        start_idx=start_bar
+                    )
+
+        # Check if price is within channel range
+        if channel:
+            if channel.support * 0.98 <= current_close <= channel.resistance * 1.02:
+                htf_channel_map[i] = channel
+                channels_found += 1
+
+    print(f"  HTF Candles with Channel: {channels_found}")
+    return htf_channel_map
+
+
 def calculate_rsi(closes: np.ndarray, period: int = 14) -> float:
     if len(closes) < period + 1:
         return 50.0
@@ -65,23 +245,80 @@ def calculate_rsi(closes: np.ndarray, period: int = 14) -> float:
     return 100 - (100 / (1 + rs))
 
 
-def simulate_trade_full(
-    candles: pd.DataFrame,
-    entry_idx: int,
-    trade_type: str,
-    entry_price: float,
-    sl_price: float,
-    tp1_price: float,
-    tp2_price: float,
-    channel_width_pct: float,
-    is_fakeout: bool
-) -> Tuple[Optional[DynamicExitFeatures], dict]:
-    """
-    전체 트레이드 시뮬레이션.
-    Returns:
-        - dynamic_features: TP1 도달 시 피처 (None if TP1 미도달)
-        - trade_result: 트레이드 결과 정보
-    """
+def extract_entry_features(candles: pd.DataFrame, idx: int, channel: Channel,
+                           trade_type: str, setup_type: str, fakeout_extreme: float = None) -> EntryFeatures:
+    """Extract features for entry prediction."""
+    closes = candles['close'].values
+    highs = candles['high'].values
+    lows = candles['low'].values
+    opens = candles['open'].values
+    volumes = candles['volume'].values
+    deltas = candles['delta'].values if 'delta' in candles.columns else np.zeros(len(candles))
+
+    lookback = 20
+    start = max(0, idx - lookback)
+
+    avg_volume = volumes[start:idx].mean() if idx > start else volumes[idx]
+    avg_delta = np.abs(deltas[start:idx]).mean() if idx > start else abs(deltas[idx])
+
+    # ATR
+    if idx >= 14:
+        tr = np.maximum(
+            highs[idx-14:idx] - lows[idx-14:idx],
+            np.abs(highs[idx-14:idx] - closes[idx-15:idx-1])
+        )
+        atr_14 = np.mean(tr)
+    else:
+        atr_14 = 0
+
+    channel_width = (channel.resistance - channel.support) / channel.support
+    price_in_channel = (closes[idx] - channel.support) / (channel.resistance - channel.support)
+
+    body = abs(closes[idx] - opens[idx])
+    candle_range = highs[idx] - lows[idx]
+    body_size_pct = body / closes[idx] if closes[idx] > 0 else 0
+    wick_ratio = (candle_range - body) / candle_range if candle_range > 0 else 0
+
+    fakeout_depth = 0
+    if fakeout_extreme and setup_type == 'FAKEOUT':
+        if trade_type == 'LONG':
+            fakeout_depth = (channel.support - fakeout_extreme) / channel.support * 100
+        else:
+            fakeout_depth = (fakeout_extreme - channel.resistance) / channel.resistance * 100
+
+    ts = candles.index[idx]
+    hour = ts.hour if hasattr(ts, 'hour') else 0
+    dow = ts.dayofweek if hasattr(ts, 'dayofweek') else 0
+
+    return EntryFeatures(
+        channel_width_pct=channel_width * 100,
+        price_in_channel_pct=price_in_channel,
+        volume_ratio=volumes[idx] / avg_volume if avg_volume > 0 else 1,
+        delta_ratio=deltas[idx] / (avg_delta + 1e-10),
+        cvd_recent=deltas[start:idx].sum() if idx > start else 0,
+        volume_ma_20=avg_volume,
+        delta_ma_20=avg_delta,
+        atr_14=atr_14,
+        atr_ratio=atr_14 / closes[idx] if closes[idx] > 0 else 0,
+        momentum_5=(closes[idx] - closes[idx-5]) / closes[idx-5] if idx >= 5 else 0,
+        momentum_20=(closes[idx] - closes[idx-20]) / closes[idx-20] if idx >= 20 else 0,
+        rsi_14=calculate_rsi(closes[:idx+1]),
+        is_bounce=1 if setup_type == 'BOUNCE' else 0,
+        is_long=1 if trade_type == 'LONG' else 0,
+        body_size_pct=body_size_pct,
+        wick_ratio=wick_ratio,
+        is_bullish=1 if closes[idx] > opens[idx] else 0,
+        hour=hour,
+        day_of_week=dow,
+        fakeout_depth_pct=fakeout_depth
+    )
+
+
+def simulate_trade_full(candles: pd.DataFrame, entry_idx: int, trade_type: str,
+                        entry_price: float, sl_price: float, tp1_price: float, tp2_price: float,
+                        channel_width_pct: float, is_fakeout: bool
+                        ) -> Tuple[Optional[DynamicExitFeatures], dict]:
+    """Full trade simulation with dynamic exit features."""
     is_long = trade_type == 'LONG'
     max_candles = 200
 
@@ -102,7 +339,6 @@ def simulate_trade_full(
     cumulative_volume = 0
     max_favorable = 0
 
-    # 평균 델타/볼륨
     lookback = 20
     if entry_idx >= lookback:
         avg_delta = np.mean(np.abs(deltas[entry_idx-lookback:entry_idx]))
@@ -125,7 +361,7 @@ def simulate_trade_full(
             favorable = (entry_price - low) / entry_price
         max_favorable = max(max_favorable, favorable)
 
-        # SL 체크 (TP1 전)
+        # SL check (before TP1)
         if not hit_tp1:
             if is_long and low <= sl_price:
                 hit_sl = True
@@ -134,7 +370,7 @@ def simulate_trade_full(
                 hit_sl = True
                 break
 
-        # TP1 체크
+        # TP1 check
         if not hit_tp1:
             if is_long and high >= tp1_price:
                 hit_tp1 = True
@@ -143,7 +379,7 @@ def simulate_trade_full(
                 hit_tp1 = True
                 tp1_idx = i
 
-        # TP2 체크 (TP1 후)
+        # TP2 check (after TP1)
         if hit_tp1 and not hit_tp2:
             if is_long and high >= tp2_price:
                 hit_tp2 = True
@@ -152,7 +388,7 @@ def simulate_trade_full(
                 hit_tp2 = True
                 break
 
-            # BE 체크
+            # BE check
             if is_long and low <= entry_price:
                 hit_be_after_tp1 = True
                 break
@@ -160,7 +396,6 @@ def simulate_trade_full(
                 hit_be_after_tp1 = True
                 break
 
-    # 결과
     trade_result = {
         'hit_tp1': hit_tp1,
         'hit_tp2': hit_tp2,
@@ -173,7 +408,6 @@ def simulate_trade_full(
         'is_long': is_long
     }
 
-    # TP1 미도달
     if not hit_tp1:
         return None, trade_result
 
@@ -228,35 +462,121 @@ def simulate_trade_full(
     return features, trade_result
 
 
-def collect_all_data(df_1h, df_15m):
-    """모든 트레이드 데이터 수집 (Entry 피처 + Dynamic Exit 피처 + 결과)."""
-    channels_dict, fakeout_signals = build_htf_channels(df_1h)
+def simulate_trade_for_entry_label(candles, idx, trade_type, entry, sl, tp1, tp2):
+    """Simulate trade to determine if it's a winning entry."""
+    highs = candles['high'].values
+    lows = candles['low'].values
+
+    for j in range(idx + 1, min(idx + 150, len(candles))):
+        if trade_type == 'LONG':
+            if lows[j] <= sl:
+                return False, 0  # Loss
+            if highs[j] >= tp1:
+                return True, 1  # Win (at least TP1)
+        else:
+            if highs[j] >= sl:
+                return False, 0
+            if lows[j] <= tp1:
+                return True, 1
+
+    return False, 0  # Timeout
+
+
+def collect_all_data(df_htf, df_ltf, htf_tf='1h', ltf_tf='15m', swing_len=3, tolerance=0.005):
+    """Collect all trade data with horizontal channel detection."""
+    htf_channel_map = build_horizontal_channels(df_htf, swing_len, tolerance)
 
     sl_buffer_pct = 0.002
     touch_threshold = 0.003
-    tf_ratio = 4
-    htf_fakeout_map = {fs.htf_idx: fs for fs in fakeout_signals}
+
+    # Calculate timeframe ratio
+    tf_mins = {'1m': 1, '5m': 5, '15m': 15, '30m': 30, '1h': 60, '4h': 240}
+    tf_ratio = tf_mins[htf_tf] // tf_mins[ltf_tf]
 
     traded_entries = set()
 
-    # 수집할 데이터
     entry_features_list = []
     entry_labels = []
-    dynamic_features_list = []  # None if TP1 미도달
-    dynamic_labels = []  # EXIT_AT_TP1 or HOLD_FOR_TP2
+    dynamic_features_list = []
+    dynamic_labels = []
     trade_results = []
     timestamps = []
 
-    ltf_highs = df_15m['high'].values
-    ltf_lows = df_15m['low'].values
-    ltf_closes = df_15m['close'].values
+    ltf_highs = df_ltf['high'].values
+    ltf_lows = df_ltf['low'].values
+    ltf_closes = df_ltf['close'].values
 
-    for i in tqdm(range(50, len(df_15m) - 250), desc='Collecting data'):
+    # Track pending fakeouts
+    pending_breaks: List[dict] = []
+    max_fakeout_wait = 5 * tf_ratio
+
+    for i in tqdm(range(50, len(df_ltf) - 250), desc='Collecting data'):
         current_close = ltf_closes[i]
         current_high = ltf_highs[i]
         current_low = ltf_lows[i]
         htf_idx = i // tf_ratio
-        channel = channels_dict.get(htf_idx)
+        channel = htf_channel_map.get(htf_idx - 1)  # Fix lookahead bias
+
+        # Process pending fakeouts even without active channel
+        for pb in pending_breaks[:]:
+            candles_since = i - pb['break_idx']
+            if candles_since > max_fakeout_wait:
+                pending_breaks.remove(pb)
+                continue
+
+            if pb['type'] == 'bear':
+                pb['extreme'] = min(pb['extreme'], current_low)
+                if current_close > pb['channel'].support:
+                    entry = current_close
+                    sl = pb['extreme'] * (1 - sl_buffer_pct)
+                    mid = (pb['channel'].resistance + pb['channel'].support) / 2
+                    tp1 = mid
+                    tp2 = pb['channel'].resistance * 0.998
+                    f_width = (pb['channel'].resistance - pb['channel'].support) / pb['channel'].support
+
+                    trade_key = (round(pb['channel'].support), round(pb['channel'].resistance), 'fakeout', i)
+                    if trade_key not in traded_entries and entry > sl and tp1 > entry:
+                        entry_feat = extract_entry_features(df_ltf, i, pb['channel'], 'LONG', 'FAKEOUT', pb['extreme'])
+                        is_win, _ = simulate_trade_for_entry_label(df_ltf, i, 'LONG', entry, sl, tp1, tp2)
+                        entry_label = TAKE if is_win else SKIP
+
+                        dyn_feat, result = simulate_trade_full(df_ltf, i, 'LONG', entry, sl, tp1, tp2, f_width, True)
+
+                        entry_features_list.append(entry_feat)
+                        entry_labels.append(entry_label)
+                        dynamic_features_list.append(dyn_feat)
+                        dynamic_labels.append(HOLD_FOR_TP2 if result['hit_tp2'] else EXIT_AT_TP1)
+                        trade_results.append(result)
+                        timestamps.append(df_ltf.index[i])
+                        traded_entries.add(trade_key)
+                    pending_breaks.remove(pb)
+
+            else:  # bull fakeout
+                pb['extreme'] = max(pb['extreme'], current_high)
+                if current_close < pb['channel'].resistance:
+                    entry = current_close
+                    sl = pb['extreme'] * (1 + sl_buffer_pct)
+                    mid = (pb['channel'].resistance + pb['channel'].support) / 2
+                    tp1 = mid
+                    tp2 = pb['channel'].support * 1.002
+                    f_width = (pb['channel'].resistance - pb['channel'].support) / pb['channel'].support
+
+                    trade_key = (round(pb['channel'].support), round(pb['channel'].resistance), 'fakeout', i)
+                    if trade_key not in traded_entries and sl > entry and entry > tp1:
+                        entry_feat = extract_entry_features(df_ltf, i, pb['channel'], 'SHORT', 'FAKEOUT', pb['extreme'])
+                        is_win, _ = simulate_trade_for_entry_label(df_ltf, i, 'SHORT', entry, sl, tp1, tp2)
+                        entry_label = TAKE if is_win else SKIP
+
+                        dyn_feat, result = simulate_trade_full(df_ltf, i, 'SHORT', entry, sl, tp1, tp2, f_width, True)
+
+                        entry_features_list.append(entry_feat)
+                        entry_labels.append(entry_label)
+                        dynamic_features_list.append(dyn_feat)
+                        dynamic_labels.append(HOLD_FOR_TP2 if result['hit_tp2'] else EXIT_AT_TP1)
+                        trade_results.append(result)
+                        timestamps.append(df_ltf.index[i])
+                        traded_entries.add(trade_key)
+                    pending_breaks.remove(pb)
 
         if not channel:
             continue
@@ -264,67 +584,38 @@ def collect_all_data(df_1h, df_15m):
         mid_price = (channel.resistance + channel.support) / 2
         channel_width = (channel.resistance - channel.support) / channel.support
 
-        # Fakeout
-        fakeout_signal = htf_fakeout_map.get(htf_idx - 1)  # Fix lookahead bias
-        if fakeout_signal and i % tf_ratio == 0:
-            f_channel = fakeout_signal.channel
-            f_mid = (f_channel.resistance + f_channel.support) / 2
-            f_width = (f_channel.resistance - f_channel.support) / f_channel.support
-            trade_key = (round(f_channel.support), round(f_channel.resistance), 'fakeout', htf_idx)
+        # Check for breakouts (potential fakeouts)
+        if current_close < channel.support * 0.997:
+            already_tracking = any(
+                pb['channel'].support == channel.support and pb['channel'].resistance == channel.resistance
+                for pb in pending_breaks
+            )
+            if not already_tracking:
+                pending_breaks.append({
+                    'type': 'bear',
+                    'break_idx': i,
+                    'channel': channel,
+                    'extreme': current_low
+                })
+        elif current_close > channel.resistance * 1.003:
+            already_tracking = any(
+                pb['channel'].support == channel.support and pb['channel'].resistance == channel.resistance
+                for pb in pending_breaks
+            )
+            if not already_tracking:
+                pending_breaks.append({
+                    'type': 'bull',
+                    'break_idx': i,
+                    'channel': channel,
+                    'extreme': current_high
+                })
 
-            if trade_key not in traded_entries:
-                if fakeout_signal.type == 'bear':
-                    entry = current_close
-                    sl = fakeout_signal.extreme * (1 - sl_buffer_pct)
-                    tp1 = f_mid
-                    tp2 = f_channel.resistance * 0.998
-
-                    if entry > sl and tp1 > entry:
-                        # Entry 피처
-                        entry_feat = extract_features(df_15m, i, f_channel, 'LONG', 'FAKEOUT', fakeout_signal.extreme)
-                        is_win, _ = simulate_trade_for_entry_label(df_15m, i, 'LONG', entry, sl, tp1, tp2)
-                        entry_label = TAKE if is_win else SKIP
-
-                        # Full simulation
-                        dyn_feat, result = simulate_trade_full(
-                            df_15m, i, 'LONG', entry, sl, tp1, tp2, f_width, True
-                        )
-
-                        entry_features_list.append(entry_feat)
-                        entry_labels.append(entry_label)
-                        dynamic_features_list.append(dyn_feat)
-                        dynamic_labels.append(HOLD_FOR_TP2 if result['hit_tp2'] else EXIT_AT_TP1)
-                        trade_results.append(result)
-                        timestamps.append(df_15m.index[i])
-                        traded_entries.add(trade_key)
-                else:
-                    entry = current_close
-                    sl = fakeout_signal.extreme * (1 + sl_buffer_pct)
-                    tp1 = f_mid
-                    tp2 = f_channel.support * 1.002
-
-                    if sl > entry and entry > tp1:
-                        entry_feat = extract_features(df_15m, i, f_channel, 'SHORT', 'FAKEOUT', fakeout_signal.extreme)
-                        is_win, _ = simulate_trade_for_entry_label(df_15m, i, 'SHORT', entry, sl, tp1, tp2)
-                        entry_label = TAKE if is_win else SKIP
-
-                        dyn_feat, result = simulate_trade_full(
-                            df_15m, i, 'SHORT', entry, sl, tp1, tp2, f_width, True
-                        )
-
-                        entry_features_list.append(entry_feat)
-                        entry_labels.append(entry_label)
-                        dynamic_features_list.append(dyn_feat)
-                        dynamic_labels.append(HOLD_FOR_TP2 if result['hit_tp2'] else EXIT_AT_TP1)
-                        trade_results.append(result)
-                        timestamps.append(df_15m.index[i])
-                        traded_entries.add(trade_key)
-
-        # Bounce
+        # Bounce entries
         trade_key = (round(channel.support), round(channel.resistance), 'bounce', i // 10)
         if trade_key in traded_entries:
             continue
 
+        # BOUNCE: Support touch -> LONG
         if current_low <= channel.support * (1 + touch_threshold) and current_close > channel.support:
             entry = current_close
             sl = channel.support * (1 - sl_buffer_pct)
@@ -332,22 +623,21 @@ def collect_all_data(df_1h, df_15m):
             tp2 = channel.resistance * 0.998
 
             if entry > sl and tp1 > entry:
-                entry_feat = extract_features(df_15m, i, channel, 'LONG', 'BOUNCE', None)
-                is_win, _ = simulate_trade_for_entry_label(df_15m, i, 'LONG', entry, sl, tp1, tp2)
+                entry_feat = extract_entry_features(df_ltf, i, channel, 'LONG', 'BOUNCE', None)
+                is_win, _ = simulate_trade_for_entry_label(df_ltf, i, 'LONG', entry, sl, tp1, tp2)
                 entry_label = TAKE if is_win else SKIP
 
-                dyn_feat, result = simulate_trade_full(
-                    df_15m, i, 'LONG', entry, sl, tp1, tp2, channel_width, False
-                )
+                dyn_feat, result = simulate_trade_full(df_ltf, i, 'LONG', entry, sl, tp1, tp2, channel_width, False)
 
                 entry_features_list.append(entry_feat)
                 entry_labels.append(entry_label)
                 dynamic_features_list.append(dyn_feat)
                 dynamic_labels.append(HOLD_FOR_TP2 if result['hit_tp2'] else EXIT_AT_TP1)
                 trade_results.append(result)
-                timestamps.append(df_15m.index[i])
+                timestamps.append(df_ltf.index[i])
                 traded_entries.add(trade_key)
 
+        # BOUNCE: Resistance touch -> SHORT
         elif current_high >= channel.resistance * (1 - touch_threshold) and current_close < channel.resistance:
             entry = current_close
             sl = channel.resistance * (1 + sl_buffer_pct)
@@ -355,20 +645,18 @@ def collect_all_data(df_1h, df_15m):
             tp2 = channel.support * 1.002
 
             if sl > entry and entry > tp1:
-                entry_feat = extract_features(df_15m, i, channel, 'SHORT', 'BOUNCE', None)
-                is_win, _ = simulate_trade_for_entry_label(df_15m, i, 'SHORT', entry, sl, tp1, tp2)
+                entry_feat = extract_entry_features(df_ltf, i, channel, 'SHORT', 'BOUNCE', None)
+                is_win, _ = simulate_trade_for_entry_label(df_ltf, i, 'SHORT', entry, sl, tp1, tp2)
                 entry_label = TAKE if is_win else SKIP
 
-                dyn_feat, result = simulate_trade_full(
-                    df_15m, i, 'SHORT', entry, sl, tp1, tp2, channel_width, False
-                )
+                dyn_feat, result = simulate_trade_full(df_ltf, i, 'SHORT', entry, sl, tp1, tp2, channel_width, False)
 
                 entry_features_list.append(entry_feat)
                 entry_labels.append(entry_label)
                 dynamic_features_list.append(dyn_feat)
                 dynamic_labels.append(HOLD_FOR_TP2 if result['hit_tp2'] else EXIT_AT_TP1)
                 trade_results.append(result)
-                timestamps.append(df_15m.index[i])
+                timestamps.append(df_ltf.index[i])
                 traded_entries.add(trade_key)
 
     return {
@@ -382,19 +670,15 @@ def collect_all_data(df_1h, df_15m):
 
 
 def entry_features_to_array(features_list):
-    """Entry 피처를 배열로 변환."""
     return np.array([[
-        f.channel_width_pct, f.support_touches, f.resistance_touches, f.total_touches,
-        f.price_in_channel_pct, f.volume_ratio, f.delta_ratio, f.cvd_recent,
+        f.channel_width_pct, f.price_in_channel_pct, f.volume_ratio, f.delta_ratio, f.cvd_recent,
         f.volume_ma_20, f.delta_ma_20, f.atr_14, f.atr_ratio,
         f.momentum_5, f.momentum_20, f.rsi_14, f.is_bounce, f.is_long,
-        f.body_size_pct, f.wick_ratio, f.is_bullish, f.hour, f.day_of_week,
-        f.fakeout_depth_pct
+        f.body_size_pct, f.wick_ratio, f.is_bullish, f.hour, f.day_of_week, f.fakeout_depth_pct
     ] for f in features_list])
 
 
 def dynamic_features_to_array(features_list):
-    """Dynamic exit 피처를 배열로 변환 (None 항목 제외)."""
     valid = [(i, f) for i, f in enumerate(features_list) if f is not None]
     indices = [i for i, _ in valid]
     arr = np.array([[
@@ -408,12 +692,6 @@ def dynamic_features_to_array(features_list):
 
 
 def backtest(trade_results, entry_preds, exit_preds, exit_pred_map, label):
-    """
-    백테스트 실행.
-    - entry_preds: TAKE(1) / SKIP(0) 배열
-    - exit_preds: EXIT_AT_TP1(0) / HOLD_FOR_TP2(1) (TP1 도달 트레이드만)
-    - exit_pred_map: trade_idx -> exit_pred_idx 매핑
-    """
     capital = 10000
     risk_pct = 0.015
     max_leverage = 15
@@ -427,7 +705,7 @@ def backtest(trade_results, entry_preds, exit_preds, exit_pred_map, label):
     trade_returns = []
 
     for idx, (result, take_trade) in enumerate(zip(trade_results, entry_preds)):
-        if take_trade == ENTRY_SKIP:
+        if take_trade == SKIP:
             continue
 
         trades_taken += 1
@@ -447,38 +725,31 @@ def backtest(trade_results, entry_preds, exit_preds, exit_pred_map, label):
         leverage = min(risk_pct / sl_dist, max_leverage)
         position = capital * leverage
 
-        # PnL 계산
         if hit_sl:
-            # SL 손실
             if is_long:
                 pnl_pct = (sl - entry) / entry
             else:
                 pnl_pct = (entry - sl) / entry
         elif not hit_tp1:
-            # TP1도 못가고 타임아웃 (BE 가정)
             pnl_pct = 0
         else:
-            # TP1 도달 → exit 전략 적용
             if idx in exit_pred_map:
                 exit_pred = exit_preds[exit_pred_map[idx]]
             else:
-                exit_pred = EXIT_AT_TP1  # fallback
+                exit_pred = EXIT_AT_TP1
 
             if exit_pred == EXIT_AT_TP1:
-                # TP1에서 전량 청산
                 if is_long:
                     pnl_pct = (tp1 - entry) / entry
                 else:
                     pnl_pct = (entry - tp1) / entry
-            else:  # HOLD_FOR_TP2
+            else:
                 if hit_tp2:
-                    # 50% TP1 + 50% TP2
                     if is_long:
                         pnl_pct = 0.5 * (tp1 - entry) / entry + 0.5 * (tp2 - entry) / entry
                     else:
                         pnl_pct = 0.5 * (entry - tp1) / entry + 0.5 * (entry - tp2) / entry
                 else:
-                    # 50% TP1 + 50% BE
                     if is_long:
                         pnl_pct = 0.5 * (tp1 - entry) / entry
                     else:
@@ -522,23 +793,32 @@ def backtest(trade_results, entry_preds, exit_preds, exit_pred_map, label):
 
 
 def main():
+    # Parse arguments: python script.py [htf] [ltf] [swing_len] [tolerance]
+    htf = sys.argv[1] if len(sys.argv) > 1 else "1h"
+    ltf = sys.argv[2] if len(sys.argv) > 2 else "15m"
+    swing_len = int(sys.argv[3]) if len(sys.argv) > 3 else 3
+    tolerance = float(sys.argv[4]) if len(sys.argv) > 4 else 0.5
+
     print("="*60)
-    print("  ML FINAL COMBINED TEST")
-    print("  ML Entry (0.7) + ML Dynamic Exit")
+    print("  HORIZONTAL CHANNEL + ML TEST")
+    print(f"  HTF: {htf}, LTF: {ltf}")
+    print(f"  Swing Length: {swing_len}, Tolerance: {tolerance}%")
     print("  Train: 2022-2023 | Test: 2024-2025")
     print("="*60)
 
-    # Load data
-    print("\nLoading data...")
-    df_1h = load_candles('BTCUSDT', '1h').to_pandas().set_index('time')
-    df_15m = load_candles('BTCUSDT', '15m').to_pandas().set_index('time')
-    print(f"  1H: {len(df_1h)}, 15m: {len(df_15m)}")
-    print(f"  Range: {df_15m.index.min()} ~ {df_15m.index.max()}")
+    print(f"\nLoading data...")
+    df_htf = load_candles('BTCUSDT', htf).to_pandas().set_index('time')
+    df_ltf = load_candles('BTCUSDT', ltf).to_pandas().set_index('time')
+    print(f"  HTF ({htf}): {len(df_htf)}, LTF ({ltf}): {len(df_ltf)}")
+    print(f"  Range: {df_ltf.index.min()} ~ {df_ltf.index.max()}")
 
-    # Collect all data
     print("\nCollecting all trade data...")
-    data = collect_all_data(df_1h, df_15m)
+    data = collect_all_data(df_htf, df_ltf, htf, ltf, swing_len, tolerance / 100)
     print(f"  Total signals: {len(data['entry_labels'])}")
+
+    if len(data['entry_labels']) == 0:
+        print("  No signals found!")
+        return
 
     # Split IS/OOS
     years = np.array([t.year for t in data['timestamps']])
@@ -547,6 +827,10 @@ def main():
 
     print(f"\n  IS (2022-2023): {is_mask.sum()} trades")
     print(f"  OOS (2024-2025): {oos_mask.sum()} trades")
+
+    if is_mask.sum() == 0:
+        print("  No IS data for training!")
+        return
 
     # ========== ENTRY MODEL ==========
     print("\n" + "="*60)
@@ -582,7 +866,6 @@ def main():
     print("  Training DYNAMIC EXIT Model (EXIT/HOLD at TP1)")
     print("="*60)
 
-    # TP1 도달한 트레이드만 사용
     dyn_indices_is, X_dyn_is = dynamic_features_to_array(
         [data['dynamic_features'][i] for i in range(len(data['dynamic_features'])) if is_mask[i]]
     )
@@ -591,9 +874,9 @@ def main():
         if is_mask[i] and data['dynamic_features'][i] is not None
     ])
 
-    # is_mask 인덱스 중 TP1 도달한 것만
-    is_indices = np.where(is_mask)[0]
-    dyn_is_global_indices = [is_indices[i] for i in dyn_indices_is]
+    if len(X_dyn_is) == 0:
+        print("  No TP1 hits in IS data!")
+        return
 
     exit_scaler = StandardScaler()
     X_dyn_is_scaled = exit_scaler.fit_transform(X_dyn_is)
@@ -616,18 +899,19 @@ def main():
     print("  OOS PREDICTIONS (2024-2025)")
     print("="*60)
 
-    # Entry predictions
+    if oos_mask.sum() == 0:
+        print("  No OOS data!")
+        return
+
     X_entry_oos = X_entry[oos_mask]
     X_entry_oos_scaled = entry_scaler.transform(X_entry_oos)
     entry_probs_oos = entry_model.predict_proba(X_entry_oos_scaled)[:, 1]
 
-    # Exit predictions for TP1 hit trades
     oos_indices = np.where(oos_mask)[0]
     dyn_indices_oos_local, X_dyn_oos = dynamic_features_to_array(
         [data['dynamic_features'][i] for i in oos_indices]
     )
 
-    # Mapping: global idx -> local exit pred idx
     exit_pred_map = {}
     for local_exit_idx, local_idx in enumerate(dyn_indices_oos_local):
         global_idx = oos_indices[local_idx]
@@ -636,12 +920,9 @@ def main():
     if len(X_dyn_oos) > 0:
         X_dyn_oos_scaled = exit_scaler.transform(X_dyn_oos)
         exit_preds_oos = exit_model.predict(X_dyn_oos_scaled)
-        exit_probs_oos = exit_model.predict_proba(X_dyn_oos_scaled)[:, 1]
     else:
         exit_preds_oos = np.array([])
-        exit_probs_oos = np.array([])
 
-    # OOS trades
     oos_results = [data['trade_results'][i] for i in oos_indices]
 
     # ========== BACKTEST ==========
@@ -649,57 +930,32 @@ def main():
     print("  BACKTEST RESULTS (2024-2025)")
     print("="*60)
 
-    # 1. Baseline (No ML, All trades, TP2 fixed)
+    # 1. Baseline (No ML)
     baseline_entry = np.ones(len(oos_results), dtype=int)
-    baseline_exit = np.zeros(len(exit_preds_oos), dtype=int)  # Always EXIT at TP1
-    # Actually for baseline TP2 strategy, we need HOLD
-    baseline_exit_hold = np.ones(len(exit_preds_oos), dtype=int)  # Always HOLD for TP2
-
-    # For baseline, use global indices mapping
+    baseline_exit_hold = np.ones(len(exit_preds_oos), dtype=int)
     baseline_map = {oos_indices[local_idx]: local_exit_idx
                     for local_exit_idx, local_idx in enumerate(dyn_indices_oos_local)}
 
     backtest(oos_results, baseline_entry, baseline_exit_hold, baseline_map,
-             "1. Baseline (No ML, All trades, HOLD for TP2)")
+             "1. Baseline (No ML, HOLD for TP2)")
 
-    # 2. ML Entry Only (threshold=0.7, HOLD for TP2)
+    # 2. ML Entry Only
     entry_preds_70 = (entry_probs_oos >= 0.7).astype(int)
     backtest(oos_results, entry_preds_70, baseline_exit_hold, baseline_map,
-             "2. ML Entry Only (threshold=0.7, HOLD for TP2)")
+             "2. ML Entry Only (threshold=0.7)")
 
-    # 3. ML Dynamic Exit Only (All trades)
+    # 3. ML Dynamic Exit Only
     backtest(oos_results, baseline_entry, exit_preds_oos, exit_pred_map,
-             "3. ML Dynamic Exit Only (All trades)")
+             "3. ML Dynamic Exit Only")
 
-    # 4. ML Combined: Entry(0.7) + Dynamic Exit
+    # 4. ML Combined
     backtest(oos_results, entry_preds_70, exit_preds_oos, exit_pred_map,
              "4. ML COMBINED: Entry(0.7) + Dynamic Exit")
-
-    # Additional thresholds
-    print("\n" + "="*60)
-    print("  ADDITIONAL THRESHOLD TESTS")
-    print("="*60)
-
-    entry_preds_60 = (entry_probs_oos >= 0.6).astype(int)
-    backtest(oos_results, entry_preds_60, exit_preds_oos, exit_pred_map,
-             "ML Combined: Entry(0.6) + Dynamic Exit")
-
-    entry_preds_50 = (entry_probs_oos >= 0.5).astype(int)
-    backtest(oos_results, entry_preds_50, exit_preds_oos, exit_pred_map,
-             "ML Combined: Entry(0.5) + Dynamic Exit")
 
     # Summary
     print("\n" + "="*60)
     print("  SUMMARY")
     print("="*60)
-    print("""
-  1. Baseline: 모든 신호 진입, HOLD for TP2 고정
-  2. ML Entry Only: 저품질 신호 필터링, HOLD for TP2 고정
-  3. ML Dynamic Exit Only: 모든 신호 진입, TP1에서 동적 결정
-  4. ML Combined: Entry 필터 + Dynamic Exit (최적 조합)
-    """)
-
-    # Stats
     print(f"\n  Entry Model filtered {(1 - entry_preds_70.mean())*100:.1f}% of signals (threshold=0.7)")
     if len(exit_preds_oos) > 0:
         print(f"  Exit Model chose EXIT at TP1: {(exit_preds_oos == EXIT_AT_TP1).mean()*100:.1f}%")

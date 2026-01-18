@@ -112,7 +112,8 @@ class FakeoutSignal:
 def build_htf_channels(htf_candles: pd.DataFrame,
                        max_channel_width: float = 0.05,  # 5%
                        min_channel_width: float = 0.008,
-                       touch_threshold: float = 0.004) -> Tuple[Dict[int, Channel], List[FakeoutSignal]]:
+                       touch_threshold: float = 0.004,
+                       tiebreaker: str = 'first') -> Tuple[Dict[int, Channel], List[FakeoutSignal]]:
     """
     Build evolving channels on HTF.
     Returns dict mapping HTF candle index to active confirmed channel.
@@ -328,8 +329,8 @@ def build_htf_channels(htf_candles: pd.DataFrame,
             del active_channels[key]
 
         # Find best confirmed channel for this HTF index
-        best_channel = None
-        best_score = -1
+        # Collect all valid candidates with scores
+        candidates = []
 
         for key, channel in active_channels.items():
             if not channel.confirmed:
@@ -339,13 +340,25 @@ def build_htf_channels(htf_candles: pd.DataFrame,
             if current_close < channel.support * 0.98 or current_close > channel.resistance * 1.02:
                 continue
 
-            # Score by total touches and recency
+            # Score by total touches
             score = channel.support_touches + channel.resistance_touches
-            if score > best_score:
-                best_score = score
-                best_channel = channel
+            width_pct = (channel.resistance - channel.support) / channel.support
+            candidates.append((score, width_pct, channel))
 
-        if best_channel:
+        if candidates:
+            # Find max score
+            max_score = max(c[0] for c in candidates)
+            top_candidates = [c for c in candidates if c[0] == max_score]
+
+            # Apply tiebreaker
+            if len(top_candidates) == 1:
+                best_channel = top_candidates[0][2]
+            elif tiebreaker == 'narrow':
+                # Select narrowest channel
+                best_channel = min(top_candidates, key=lambda c: c[1])[2]
+            else:  # 'first' - original behavior
+                best_channel = top_candidates[0][2]
+
             htf_channel_map[i] = best_channel
 
     confirmed_count = len(set(id(c) for c in htf_channel_map.values()))
@@ -368,11 +381,12 @@ def collect_mtf_setups(htf_candles: pd.DataFrame,
                        ltf_tf: str = "15m",
                        touch_threshold: float = 0.003,
                        sl_buffer_pct: float = 0.0008,
-                       quiet: bool = False) -> List[dict]:
+                       quiet: bool = False,
+                       tiebreaker: str = 'first') -> List[dict]:
     """Collect setups using MTF analysis."""
 
     # Build HTF channels and fakeout signals
-    htf_channel_map, htf_fakeout_signals = build_htf_channels(htf_candles)
+    htf_channel_map, htf_fakeout_signals = build_htf_channels(htf_candles, tiebreaker=tiebreaker)
 
     # LTF data
     ltf_highs = ltf_candles['high'].values
@@ -419,53 +433,8 @@ def collect_mtf_setups(htf_candles: pd.DataFrame,
 
         mid_price = (channel.resistance + channel.support) / 2
 
-        # Check for HTF fakeout signal - use previous HTF candle to avoid lookahead
-        fakeout_signal = htf_fakeout_map.get(htf_idx - 1)
-        if fakeout_signal and i % tf_ratio == 0:  # First LTF candle of HTF
-            f_channel = fakeout_signal.channel
-            f_mid = (f_channel.resistance + f_channel.support) / 2
-
-            trade_key = (round(f_channel.support), round(f_channel.resistance), 'fakeout', htf_idx)
-            if trade_key not in traded_entries:
-                if fakeout_signal.type == 'bear':
-                    # LONG on bear fakeout
-                    entry_price = current_close
-                    sl_price = fakeout_signal.extreme * (1 - sl_buffer_pct)
-                    tp1_price = f_mid
-                    tp2_price = f_channel.resistance * 0.998
-
-                    risk = entry_price - sl_price
-                    reward1 = tp1_price - entry_price
-
-                    if risk > 0 and reward1 > 0:
-                        setup = simulate_trade(
-                            ltf_candles, i, 'LONG', entry_price, sl_price, tp1_price, tp2_price,
-                            f_channel, fakeout_signal.extreme, 0, 'FAKEOUT',
-                            ltf_volumes, ltf_deltas, avg_volume, avg_delta, cvd_recent, ltf_opens, ltf_closes
-                        )
-                        if setup:
-                            setups.append(setup)
-                            traded_entries.add(trade_key)
-
-                else:  # bull fakeout
-                    # SHORT on bull fakeout
-                    entry_price = current_close
-                    sl_price = fakeout_signal.extreme * (1 + sl_buffer_pct)
-                    tp1_price = f_mid
-                    tp2_price = f_channel.support * 1.002
-
-                    risk = sl_price - entry_price
-                    reward1 = entry_price - tp1_price
-
-                    if risk > 0 and reward1 > 0:
-                        setup = simulate_trade(
-                            ltf_candles, i, 'SHORT', entry_price, sl_price, tp1_price, tp2_price,
-                            f_channel, fakeout_signal.extreme, 0, 'FAKEOUT',
-                            ltf_volumes, ltf_deltas, avg_volume, avg_delta, cvd_recent, ltf_opens, ltf_closes
-                        )
-                        if setup:
-                            setups.append(setup)
-                            traded_entries.add(trade_key)
+        # FAKEOUT DISABLED - avg PnL was -0.10% after fixing lookahead bias
+        # Only using BOUNCE entries which have +1.60% avg PnL
 
         # Check for bounce entries
         trade_key = (round(channel.support), round(channel.resistance), 'bounce', i // 20)
@@ -716,38 +685,163 @@ def analyze_results(setups: List[dict], ltf_candles: pd.DataFrame):
     run_backtest(oos_df, "OUT-OF-SAMPLE (2025) ⭐")
 
 
+def run_tiebreaker_comparison(htf_candles, ltf_candles, htf_tf, ltf_tf, tiebreaker, label):
+    """Run backtest with specific tiebreaker and return results."""
+    print(f"\n{'='*70}")
+    print(f"  {label}")
+    print(f"{'='*70}")
+
+    setups = collect_mtf_setups(htf_candles, ltf_candles, htf_tf, ltf_tf, quiet=True, tiebreaker=tiebreaker)
+
+    if not setups:
+        print("  No setups found!")
+        return None
+
+    df = pd.DataFrame(setups)
+    df['time'] = ltf_candles.index[df['idx'].values]
+    df['year'] = pd.to_datetime(df['time']).dt.year
+
+    # Calculate stats
+    bounce_df = df[df['setup_type'] == 'BOUNCE']
+    fakeout_df = df[df['setup_type'] == 'FAKEOUT']
+
+    bounce_wr = (bounce_df['outcome'] >= 0.5).mean() * 100 if len(bounce_df) > 0 else 0
+    fakeout_wr = (fakeout_df['outcome'] >= 0.5).mean() * 100 if len(fakeout_df) > 0 else 0
+    total_wr = (df['outcome'] >= 0.5).mean() * 100
+
+    avg_pnl = df['pnl_pct'].mean() * 100
+    bounce_avg = bounce_df['pnl_pct'].mean() * 100 if len(bounce_df) > 0 else 0
+    fakeout_avg = fakeout_df['pnl_pct'].mean() * 100 if len(fakeout_df) > 0 else 0
+
+    print(f"\n  Total: {len(df)} trades, Avg PnL: {avg_pnl:+.4f}%")
+    print(f"  BOUNCE:  {len(bounce_df)} trades, WR: {bounce_wr:.1f}%, Avg: {bounce_avg:+.4f}%")
+    print(f"  FAKEOUT: {len(fakeout_df)} trades, WR: {fakeout_wr:.1f}%, Avg: {fakeout_avg:+.4f}%")
+    print(f"  Overall WR: {total_wr:.1f}%")
+
+    # Run backtest
+    capital = 10000
+    risk_pct = 0.015
+    max_leverage = 15
+    fee_pct = 0.0004
+
+    peak = capital
+    max_dd = 0
+    wins = 0
+    losses = 0
+
+    for _, trade in df.iterrows():
+        sl_dist = abs(trade['entry'] - trade['sl']) / trade['entry']
+        if sl_dist <= 0:
+            continue
+
+        leverage = min(risk_pct / sl_dist, max_leverage)
+        position_value = capital * leverage
+
+        gross_pnl = position_value * trade['pnl_pct']
+        fees = position_value * fee_pct * 2
+        net_pnl = gross_pnl - fees
+
+        capital += net_pnl
+        capital = max(capital, 0)
+
+        if net_pnl > 0:
+            wins += 1
+        else:
+            losses += 1
+
+        if capital > peak:
+            peak = capital
+        dd = (peak - capital) / peak if peak > 0 else 0
+        max_dd = max(max_dd, dd)
+
+        if capital <= 0:
+            break
+
+    total_return = (capital - 10000) / 10000 * 100
+
+    print(f"\n  Backtest (1.5% risk, fees):")
+    print(f"    Return: {total_return:+.1f}%")
+    print(f"    Max DD: {max_dd*100:.1f}%")
+    print(f"    Final: ${capital:,.2f}")
+
+    return {
+        'total_trades': len(df),
+        'bounce_trades': len(bounce_df),
+        'fakeout_trades': len(fakeout_df),
+        'bounce_wr': bounce_wr,
+        'fakeout_wr': fakeout_wr,
+        'total_wr': total_wr,
+        'return': total_return,
+        'max_dd': max_dd * 100,
+        'final_capital': capital
+    }
+
+
 def main():
-    # Parse arguments: python script.py [htf] [ltf]
-    # Default: 1h 15m
-    htf = sys.argv[1] if len(sys.argv) > 1 else "1h"
-    ltf = sys.argv[2] if len(sys.argv) > 2 else "15m"
+    htf = "1h"
+    ltf = "15m"
 
     print(f"""
-╔═══════════════════════════════════════════════════════════╗
-║   MTF Proper Channel Strategy                             ║
-║   HTF ({htf}) channels + LTF ({ltf}) entries                   ║
-║   BOUNCE + FAKEOUT | Partial TP + Breakeven               ║
-╚═══════════════════════════════════════════════════════════╝
+╔═══════════════════════════════════════════════════════════════════════╗
+║   Tiebreaker Comparison: FIRST vs NARROW                              ║
+║   원본 ml_channel_proper_mtf.py 로직 유지                              ║
+║   같은 score일 때 tiebreaker만 다르게 적용                              ║
+╚═══════════════════════════════════════════════════════════════════════╝
 """)
 
     print(f"Loading {htf} data...")
     htf_candles_pl = load_candles("BTCUSDT", htf)
     htf_candles = htf_candles_pl.to_pandas().set_index('time')
-    print(f"  Loaded {len(htf_candles):,} candles\n")
 
-    print(f"Loading {ltf} data...")
+    # Filter to 2024 only for fair comparison with original
+    htf_candles = htf_candles[htf_candles.index.year == 2024]
+    print(f"  Loaded {len(htf_candles):,} candles (2024 only)")
+
+    print(f"\nLoading {ltf} data...")
     ltf_candles_pl = load_candles("BTCUSDT", ltf)
     ltf_candles = ltf_candles_pl.to_pandas().set_index('time')
-    print(f"  Loaded {len(ltf_candles):,} candles")
-    print(f"  Date range: {ltf_candles.index[0]} ~ {ltf_candles.index[-1]}\n")
 
-    setups = collect_mtf_setups(htf_candles, ltf_candles, htf, ltf)
+    # Filter to 2024 only
+    ltf_candles = ltf_candles[ltf_candles.index.year == 2024]
+    print(f"  Loaded {len(ltf_candles):,} candles (2024 only)")
+    print(f"  Date range: {ltf_candles.index[0]} ~ {ltf_candles.index[-1]}")
 
-    print("\n" + "="*60)
-    print("  MTF RESULTS")
-    print("="*60)
+    # Run both tiebreakers
+    results_first = run_tiebreaker_comparison(htf_candles, ltf_candles, htf, ltf, 'first', "FIRST (기존 방식)")
+    results_narrow = run_tiebreaker_comparison(htf_candles, ltf_candles, htf, ltf, 'narrow', "NARROW (좁은 채널 우선)")
 
-    analyze_results(setups, ltf_candles)
+    # Comparison summary
+    print("\n" + "="*70)
+    print("  비교 요약")
+    print("="*70)
+
+    if results_first and results_narrow:
+        print(f"\n{'항목':<20} {'FIRST':>15} {'NARROW':>15} {'차이':>15}")
+        print("-"*65)
+        print(f"{'총 매매':<20} {results_first['total_trades']:>15} {results_narrow['total_trades']:>15} {results_narrow['total_trades'] - results_first['total_trades']:>+15}")
+        print(f"{'BOUNCE':<20} {results_first['bounce_trades']:>15} {results_narrow['bounce_trades']:>15}")
+        print(f"{'FAKEOUT':<20} {results_first['fakeout_trades']:>15} {results_narrow['fakeout_trades']:>15}")
+        print(f"{'BOUNCE WR':<20} {results_first['bounce_wr']:>14.1f}% {results_narrow['bounce_wr']:>14.1f}% {results_narrow['bounce_wr'] - results_first['bounce_wr']:>+14.1f}%")
+        print(f"{'FAKEOUT WR':<20} {results_first['fakeout_wr']:>14.1f}% {results_narrow['fakeout_wr']:>14.1f}% {results_narrow['fakeout_wr'] - results_first['fakeout_wr']:>+14.1f}%")
+        print(f"{'전체 WR':<20} {results_first['total_wr']:>14.1f}% {results_narrow['total_wr']:>14.1f}% {results_narrow['total_wr'] - results_first['total_wr']:>+14.1f}%")
+        print(f"{'수익률':<20} {results_first['return']:>+14.1f}% {results_narrow['return']:>+14.1f}% {results_narrow['return'] - results_first['return']:>+14.1f}%")
+        print(f"{'최대 DD':<20} {results_first['max_dd']:>14.1f}% {results_narrow['max_dd']:>14.1f}%")
+        print(f"{'최종 자본':<20} ${results_first['final_capital']:>13,.0f} ${results_narrow['final_capital']:>13,.0f}")
+
+        print("\n" + "="*70)
+        print("  결론")
+        print("="*70)
+
+        if results_narrow['return'] > results_first['return']:
+            print(f"\n  ✅ NARROW 방식이 더 좋음!")
+            print(f"     수익률: {results_narrow['return']:+.1f}% vs {results_first['return']:+.1f}%")
+            print(f"     승률: {results_narrow['total_wr']:.1f}% vs {results_first['total_wr']:.1f}%")
+        elif results_narrow['return'] < results_first['return']:
+            print(f"\n  ✅ FIRST 방식이 더 좋음!")
+            print(f"     수익률: {results_first['return']:+.1f}% vs {results_narrow['return']:+.1f}%")
+            print(f"     승률: {results_first['total_wr']:.1f}% vs {results_narrow['total_wr']:.1f}%")
+        else:
+            print(f"\n  ⚖️ 두 방식이 동일한 결과!")
 
 
 if __name__ == "__main__":

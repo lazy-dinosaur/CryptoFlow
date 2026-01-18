@@ -404,7 +404,7 @@ def run_hybrid_strategy(htf_candles: pd.DataFrame,
         # RANGING: Channel Strategy
         # =====================================================================
         if current_regime == 'ranging':
-            channel = htf_channel_map.get(htf_idx)
+            channel = htf_channel_map.get(htf_idx - 1)  # Fix lookahead bias
             if channel:
                 mid_price = (channel.resistance + channel.support) / 2
                 touch_threshold = 0.003
