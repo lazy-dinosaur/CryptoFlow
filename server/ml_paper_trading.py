@@ -212,54 +212,67 @@ class MLPaperTradingService:
 
     def _load_state(self):
         """Load strategy state and active trades from database."""
-        conn = sqlite3.connect(PAPER_DB_PATH)
-        c = conn.cursor()
+        try:
+            conn = sqlite3.connect(PAPER_DB_PATH)
+            c = conn.cursor()
 
-        # Load strategy stats from last snapshot
-        for strategy_name in self.strategies:
-            c.execute('''SELECT capital, peak_capital, total_trades, wins, losses, total_pnl, max_drawdown
-                         FROM strategy_stats WHERE strategy = ? ORDER BY timestamp DESC LIMIT 1''',
-                      (strategy_name,))
-            row = c.fetchone()
-            if row:
-                state = self.strategies[strategy_name]
-                state.capital = row[0]
-                state.peak_capital = row[1]
-                state.total_trades = row[2]
-                state.wins = row[3]
-                state.losses = row[4]
-                state.total_pnl = row[5]
-                state.max_drawdown = row[6]
-                print(f"[LOAD] {strategy_name}: capital=${state.capital:,.2f}, trades={state.total_trades}")
+            # Check if tables exist
+            c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='strategy_stats'")
+            if c.fetchone():
+                # Load strategy stats from last snapshot
+                for strategy_name in self.strategies:
+                    c.execute('''SELECT capital, peak_capital, total_trades, wins, losses, total_pnl, max_drawdown
+                                 FROM strategy_stats WHERE strategy = ? ORDER BY timestamp DESC LIMIT 1''',
+                              (strategy_name,))
+                    row = c.fetchone()
+                    if row:
+                        state = self.strategies[strategy_name]
+                        state.capital = row[0]
+                        state.peak_capital = row[1]
+                        state.total_trades = row[2]
+                        state.wins = row[3]
+                        state.losses = row[4]
+                        state.total_pnl = row[5]
+                        state.max_drawdown = row[6]
+                        print(f"[LOAD] {strategy_name}: capital=${state.capital:,.2f}, trades={state.total_trades}")
+            else:
+                print("[LOAD] No strategy_stats table yet, starting fresh")
 
-        # Load active trades (status != closed)
-        for strategy_name, state in self.strategies.items():
-            c.execute('''SELECT id, signal_id, strategy, timestamp, direction, setup_type,
-                                entry_price, sl_price, tp1_price, tp2_price, status, exit_decision, pnl_pct, closed_at
-                         FROM trades WHERE strategy = ? AND status IN ('ACTIVE', 'TP1_HIT')''',
-                      (strategy_name,))
-            for row in c.fetchall():
-                trade = Trade(
-                    signal_id=row[1],
-                    strategy=row[2],
-                    timestamp=row[3],
-                    direction=row[4],
-                    setup_type=row[5],
-                    entry_price=row[6],
-                    sl_price=row[7],
-                    tp1_price=row[8],
-                    tp2_price=row[9],
-                    status=row[10],
-                    exit_decision=row[11] or '',
-                    pnl_pct=row[12] or 0.0,
-                    closed_at=row[13] or '',
-                    db_id=row[0],
-                    tp1_profit_taken=(row[10] == 'TP1_HIT')  # If status is TP1_HIT, profit was taken
-                )
-                state.active_trades.append(trade)
-                print(f"[LOAD] Restored active trade: {trade.direction} {trade.setup_type} @ {trade.entry_price:.2f} ({trade.status})")
+            # Check if trades table exists
+            c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='trades'")
+            if c.fetchone():
+                # Load active trades (status != closed)
+                for strategy_name, state in self.strategies.items():
+                    c.execute('''SELECT id, signal_id, strategy, timestamp, direction, setup_type,
+                                        entry_price, sl_price, tp1_price, tp2_price, status, exit_decision, pnl_pct, closed_at
+                                 FROM trades WHERE strategy = ? AND status IN ('ACTIVE', 'TP1_HIT')''',
+                              (strategy_name,))
+                    for row in c.fetchall():
+                        trade = Trade(
+                            signal_id=row[1],
+                            strategy=row[2],
+                            timestamp=row[3],
+                            direction=row[4],
+                            setup_type=row[5],
+                            entry_price=row[6],
+                            sl_price=row[7],
+                            tp1_price=row[8],
+                            tp2_price=row[9],
+                            status=row[10],
+                            exit_decision=row[11] or '',
+                            pnl_pct=row[12] or 0.0,
+                            closed_at=row[13] or '',
+                            db_id=row[0],
+                            tp1_profit_taken=(row[10] == 'TP1_HIT')  # If status is TP1_HIT, profit was taken
+                        )
+                        state.active_trades.append(trade)
+                        print(f"[LOAD] Restored active trade: {trade.direction} {trade.setup_type} @ {trade.entry_price:.2f} ({trade.status})")
+            else:
+                print("[LOAD] No trades table yet, starting fresh")
 
-        conn.close()
+            conn.close()
+        except Exception as e:
+            print(f"[LOAD] Error loading state: {e}, starting fresh")
 
     def _save_signal(self, signal: Signal) -> int:
         """Save signal to database and return ID."""
