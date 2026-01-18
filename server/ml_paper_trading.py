@@ -94,6 +94,7 @@ class Trade:
     pnl_pct: float = 0.0
     closed_at: str = ''
     db_id: int = 0
+    tp1_profit_taken: bool = False  # Track if TP1 profit has been added to capital
 
 
 @dataclass
@@ -565,52 +566,81 @@ class MLPaperTradingService:
                     # Check TP1
                     elif is_long and current_high >= trade.tp1_price:
                         trade.status = 'TP1_HIT'
+                        # Immediately take 50% profit at TP1
+                        if not trade.tp1_profit_taken:
+                            tp1_pnl_pct = 0.5 * (trade.tp1_price - trade.entry_price) / trade.entry_price
+                            sl_dist = abs(trade.entry_price - trade.sl_price) / trade.entry_price
+                            leverage = min(RISK_PCT / sl_dist, MAX_LEVERAGE) if sl_dist > 0 else 1
+                            position = state.capital * leverage
+                            tp1_pnl_dollar = position * tp1_pnl_pct - position * FEE_PCT  # Only 1 fee for partial close
+                            state.capital += tp1_pnl_dollar
+                            state.total_pnl += tp1_pnl_dollar
+                            trade.tp1_profit_taken = True
+                            print(f"\n[{strategy_name}] TP1 HIT - 50% profit taken!")
+                            print(f"  TP1 PnL: {tp1_pnl_pct*100:+.2f}% (${tp1_pnl_dollar:+.2f})")
+                            print(f"  Capital: ${state.capital:,.2f}")
                         # For ML_COMBINED, decide exit at TP1
                         if strategy_name == 'ML_COMBINED' and self.exit_model is not None and df_15m is not None:
-                            # TODO: Get exit features and predict
                             trade.exit_decision = 'HOLD'  # Default to HOLD for now
                     elif not is_long and current_low <= trade.tp1_price:
                         trade.status = 'TP1_HIT'
+                        # Immediately take 50% profit at TP1
+                        if not trade.tp1_profit_taken:
+                            tp1_pnl_pct = 0.5 * (trade.entry_price - trade.tp1_price) / trade.entry_price
+                            sl_dist = abs(trade.entry_price - trade.sl_price) / trade.entry_price
+                            leverage = min(RISK_PCT / sl_dist, MAX_LEVERAGE) if sl_dist > 0 else 1
+                            position = state.capital * leverage
+                            tp1_pnl_dollar = position * tp1_pnl_pct - position * FEE_PCT
+                            state.capital += tp1_pnl_dollar
+                            state.total_pnl += tp1_pnl_dollar
+                            trade.tp1_profit_taken = True
+                            print(f"\n[{strategy_name}] TP1 HIT - 50% profit taken!")
+                            print(f"  TP1 PnL: {tp1_pnl_pct*100:+.2f}% (${tp1_pnl_dollar:+.2f})")
+                            print(f"  Capital: ${state.capital:,.2f}")
                         if strategy_name == 'ML_COMBINED' and self.exit_model is not None:
                             trade.exit_decision = 'HOLD'
 
                 elif trade.status == 'TP1_HIT':
-                    # Check TP2
+                    # Check TP2 - only remaining 50% profit
                     if is_long and current_high >= trade.tp2_price:
                         trade.status = 'TP2_HIT'
-                        pnl_pct = 0.5 * (trade.tp1_price - trade.entry_price) / trade.entry_price
-                        pnl_pct += 0.5 * (trade.tp2_price - trade.entry_price) / trade.entry_price
+                        pnl_pct = 0.5 * (trade.tp2_price - trade.entry_price) / trade.entry_price  # Only remaining 50%
                         closed = True
                     elif not is_long and current_low <= trade.tp2_price:
                         trade.status = 'TP2_HIT'
-                        pnl_pct = 0.5 * (trade.entry_price - trade.tp1_price) / trade.entry_price
-                        pnl_pct += 0.5 * (trade.entry_price - trade.tp2_price) / trade.entry_price
+                        pnl_pct = 0.5 * (trade.entry_price - trade.tp2_price) / trade.entry_price  # Only remaining 50%
                         closed = True
-                    # Check BE (breakeven stop after TP1)
+                    # Check BE (breakeven stop after TP1) - remaining 50% exits at 0
                     elif is_long and current_low <= trade.entry_price:
                         trade.status = 'BE_HIT'
-                        pnl_pct = 0.5 * (trade.tp1_price - trade.entry_price) / trade.entry_price
+                        pnl_pct = 0  # Remaining 50% exits at breakeven
                         closed = True
                     elif not is_long and current_high >= trade.entry_price:
                         trade.status = 'BE_HIT'
-                        pnl_pct = 0.5 * (trade.entry_price - trade.tp1_price) / trade.entry_price
+                        pnl_pct = 0  # Remaining 50% exits at breakeven
                         closed = True
 
                 if closed:
                     trade.pnl_pct = pnl_pct
                     trade.closed_at = now
 
-                    # Update capital
+                    # Update capital for remaining position
                     sl_dist = abs(trade.entry_price - trade.sl_price) / trade.entry_price
                     leverage = min(RISK_PCT / sl_dist, MAX_LEVERAGE) if sl_dist > 0 else 1
                     position = state.capital * leverage
-                    pnl_dollar = position * pnl_pct - position * FEE_PCT * 2
+
+                    # Fee calculation: 1 fee if TP1 was hit (partial close already paid 1 fee), else 2 fees for full close
+                    fees = FEE_PCT if trade.tp1_profit_taken else FEE_PCT * 2
+                    pnl_dollar = position * pnl_pct - position * fees
 
                     state.capital += pnl_dollar
                     state.capital = max(state.capital, 0)
                     state.total_pnl += pnl_dollar
 
-                    if pnl_dollar > 0:
+                    # Win/Loss counting: if TP1 was hit, it's a win regardless of final exit
+                    if trade.tp1_profit_taken:
+                        state.wins += 1  # TP1 hit = win (even if BE after)
+                    elif pnl_dollar > 0:
                         state.wins += 1
                     else:
                         state.losses += 1
@@ -626,7 +656,7 @@ class MLPaperTradingService:
 
                     win_rate = state.wins / (state.wins + state.losses) * 100 if (state.wins + state.losses) > 0 else 0
                     print(f"\n[{strategy_name}] Trade closed: {trade.status}")
-                    print(f"  PnL: {pnl_pct*100:+.2f}% (${pnl_dollar:+.2f})")
+                    print(f"  Remaining PnL: {pnl_pct*100:+.2f}% (${pnl_dollar:+.2f})")
                     print(f"  Capital: ${state.capital:,.2f} | WR: {win_rate:.1f}% | MaxDD: {state.max_drawdown*100:.1f}%")
 
             for trade in trades_to_remove:
@@ -826,6 +856,13 @@ class MLPaperTradingService:
         current_high = df_15m['high'].iloc[-1]
         current_low = df_15m['low'].iloc[-1]
         current_time = df_15m['time'].iloc[-1] if 'time' in df_15m.columns else datetime.now()
+        # Convert to Unix timestamp in milliseconds for consistency with frontend candles
+        if hasattr(current_time, 'timestamp'):
+            current_time_ms = int(current_time.timestamp() * 1000)
+        elif isinstance(current_time, (int, float)):
+            current_time_ms = int(current_time)
+        else:
+            current_time_ms = int(datetime.now().timestamp() * 1000)
 
         # Save current price for API
         self.last_price = current_close
@@ -839,7 +876,7 @@ class MLPaperTradingService:
         # Only using BOUNCE entries which have +1.60% avg PnL
 
         # Check for bounce signals
-        signal_key = f"{round(channel.support)}_{round(channel.resistance)}_{str(current_time)[:13]}"
+        signal_key = f"{round(channel.support)}_{round(channel.resistance)}_{current_time_ms // 3600000}"
         if not hasattr(self, 'recent_signals'):
             self.recent_signals = set()
 
@@ -856,7 +893,7 @@ class MLPaperTradingService:
                     take, prob = self._predict_entry(features)
 
                     signal = Signal(
-                        timestamp=str(current_time),
+                        timestamp=str(current_time_ms),
                         direction='LONG',
                         setup_type='BOUNCE',
                         entry_price=entry,
@@ -882,7 +919,7 @@ class MLPaperTradingService:
                     take, prob = self._predict_entry(features)
 
                     signal = Signal(
-                        timestamp=str(current_time),
+                        timestamp=str(current_time_ms),
                         direction='SHORT',
                         setup_type='BOUNCE',
                         entry_price=entry,
@@ -1024,8 +1061,14 @@ class MLPaperTradingService:
                                      FROM signals ORDER BY id DESC LIMIT 10''')
                         recent_signals = []
                         for row in c.fetchall():
+                            # Convert timestamp to int (milliseconds) for frontend
+                            ts = row[0]
+                            try:
+                                ts = int(ts)
+                            except (ValueError, TypeError):
+                                ts = 0
                             recent_signals.append({
-                                'timestamp': row[0],
+                                'timestamp': ts,
                                 'direction': row[1],
                                 'setup_type': row[2],
                                 'entry_price': row[3],

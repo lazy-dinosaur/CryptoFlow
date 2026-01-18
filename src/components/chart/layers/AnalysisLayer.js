@@ -12,6 +12,9 @@ export class AnalysisLayer {
 
         // 3. Current Price Line
         this._renderCurrentPriceLine(ctx, state, coords);
+
+        // 4. Trade Signals (Paper Trading entries)
+        this._renderTradeSignals(ctx, state, coords);
     }
 
     _renderNakedLiquidity(ctx, state, coords) {
@@ -141,5 +144,98 @@ export class AnalysisLayer {
         ctx.textBaseline = 'middle';
         ctx.fillStyle = '#000000';
         ctx.fillText(text, width - 5, y);
+    }
+
+    _renderTradeSignals(ctx, state, coords) {
+        if (!state.tradeSignals || state.tradeSignals.length === 0) return;
+        if (!state.candles || state.candles.length === 0) return;
+
+        const { width, height } = state;
+
+        for (const signal of state.tradeSignals) {
+            // Find candle index by timestamp (timestamp is in milliseconds)
+            const signalTime = typeof signal.timestamp === 'number'
+                ? signal.timestamp
+                : new Date(signal.timestamp).getTime();
+            let candleIdx = -1;
+
+            // Find the candle that matches the signal time
+            for (let i = 0; i < state.candles.length; i++) {
+                const candleTime = state.candles[i].time;
+                // Allow some tolerance (within same candle period)
+                if (Math.abs(candleTime - signalTime) < 15 * 60 * 1000) { // 15 min tolerance
+                    candleIdx = i;
+                    break;
+                }
+            }
+
+            // Fallback: find nearest candle if exact match not found
+            if (candleIdx < 0) {
+                for (let i = 0; i < state.candles.length; i++) {
+                    if (state.candles[i].time >= signalTime) {
+                        candleIdx = i;
+                        break;
+                    }
+                }
+            }
+
+            if (candleIdx < 0) continue;
+
+            const x = coords.getX(candleIdx);
+            const y = coords.getY(signal.entry_price);
+
+            // Culling
+            if (x < 0 || x > width || y < 0 || y > height) continue;
+
+            const isLong = signal.direction === 'LONG';
+            const color = isLong ? '#00e676' : '#ff1744';
+            const bgColor = isLong ? 'rgba(0, 230, 118, 0.2)' : 'rgba(255, 23, 68, 0.2)';
+
+            // Draw entry marker (triangle)
+            ctx.beginPath();
+            ctx.fillStyle = color;
+            if (isLong) {
+                // Up triangle for LONG
+                ctx.moveTo(x, y - 12);
+                ctx.lineTo(x - 8, y + 4);
+                ctx.lineTo(x + 8, y + 4);
+            } else {
+                // Down triangle for SHORT
+                ctx.moveTo(x, y + 12);
+                ctx.lineTo(x - 8, y - 4);
+                ctx.lineTo(x + 8, y - 4);
+            }
+            ctx.closePath();
+            ctx.fill();
+
+            // Draw setup type label
+            const setupType = signal.setup_type || 'SIGNAL';
+            ctx.font = 'bold 9px Inter, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'bottom';
+
+            const labelY = isLong ? y - 16 : y + 20;
+            const textWidth = ctx.measureText(setupType).width;
+
+            // Label background
+            ctx.fillStyle = bgColor;
+            ctx.fillRect(x - textWidth/2 - 4, labelY - 10, textWidth + 8, 12);
+
+            // Label text
+            ctx.fillStyle = color;
+            ctx.fillText(setupType, x, labelY);
+
+            // Draw entry price line (dotted horizontal)
+            ctx.beginPath();
+            ctx.strokeStyle = color;
+            ctx.setLineDash([3, 3]);
+            ctx.lineWidth = 1;
+            ctx.globalAlpha = 0.5;
+            ctx.moveTo(x, y);
+            ctx.lineTo(width - 60, y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.globalAlpha = 1.0;
+        }
     }
 }
