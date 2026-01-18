@@ -282,6 +282,79 @@ class TradingBot:
 
 ---
 
+## 6. 기준 스크립트 (Baseline)
+
+### 6.1 실매매 기준 백테스트
+
+**파일:** `backtest/ml_channel_tiebreaker_proper.py`
+
+이 스크립트가 **실제 페이퍼트레이딩 및 라이브 트레이딩에 복사해야 하는 기준 로직**입니다.
+
+```bash
+# 실행 방법
+cd backtest
+python ml_channel_tiebreaker_proper.py narrow
+```
+
+### 6.2 Baseline 핵심 설정
+
+| 설정 | 값 | 설명 |
+|------|-----|------|
+| Tiebreaker | **NARROW** | 동일 점수 채널 중 가장 좁은 채널 선택 |
+| HTF | 1H | 채널 감지 |
+| LTF | 15M | 진입 실행 |
+| Touch Threshold | 0.003 (0.3%) | 터치 인식 범위 |
+| SL Buffer | 0.0008 (0.08%) | 손절 버퍼 |
+| Cooldown | 20 캔들 (5시간) | 같은 채널 재진입 대기 |
+
+### 6.3 Baseline 결과 (2024년)
+
+```
+Trades: 351
+Win Rate: 55.0% (outcome >= 0.5 기준)
+Return: +5,527,993,669.7%
+Max DD: 7.1%
+Final Capital: $552,799,376,965.76
+```
+
+### 6.4 채널 선택 로직 (NARROW Tiebreaker)
+
+```python
+# 1. 모든 유효한 확정 채널 수집
+candidates = []
+for channel in confirmed_channels:
+    if price_inside_channel(channel):
+        score = channel.support_touches + channel.resistance_touches
+        width_pct = (channel.resistance - channel.support) / channel.support
+        candidates.append((score, width_pct, channel))
+
+# 2. 최고 점수 채널들 필터링
+max_score = max(c[0] for c in candidates)
+top_candidates = [c for c in candidates if c[0] == max_score]
+
+# 3. NARROW tiebreaker: 가장 좁은 채널 선택
+if len(top_candidates) == 1:
+    best_channel = top_candidates[0][2]
+else:
+    best_channel = min(top_candidates, key=lambda c: c[1])[2]  # 최소 width
+```
+
+### 6.5 관련 파일
+
+| 파일 | 역할 | 비고 |
+|------|------|------|
+| `backtest/ml_channel_tiebreaker_proper.py` | **Baseline 백테스트** | 기준 로직 |
+| `server/ml_paper_trading.py` | 페이퍼 트레이딩 | Baseline 복사됨 |
+| `backtest/ml_mtf_bounce.py` | ML 연구용 백테스트 | Baseline 기반 |
+
+### 6.6 주의사항
+
+- **항상 `ml_channel_tiebreaker_proper.py`를 기준으로 로직 검증**
+- 페이퍼/라이브 트레이딩 수정 시 반드시 백테스트와 결과 비교
+- ML 필터링은 효과 없음 → 사용하지 않음
+
+---
+
 ## 부록
 
 ### A. 주요 파일 목록
