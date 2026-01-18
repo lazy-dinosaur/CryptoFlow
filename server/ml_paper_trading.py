@@ -983,6 +983,12 @@ class MLPaperTradingService:
             # Same candle, skip signal detection
             return
 
+        # First scan after startup - just record current candle time, don't process signals
+        if self.last_processed_candle_time == 0:
+            print(f"[SCAN] First scan - recording candle time, waiting for next candle close")
+            self.last_processed_candle_time = current_candle_time
+            return
+
         # New candle detected - check the COMPLETED candle (index -2)
         if len(df_15m) < 3:
             self.last_processed_candle_time = current_candle_time
