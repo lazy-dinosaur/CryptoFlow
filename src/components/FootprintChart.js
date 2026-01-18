@@ -20,6 +20,8 @@ export class FootprintChart {
         this.heatmapData = [];
         this.nakedLiquidityLevels = [];
         this.bigTrades = [];
+        this.tradeSignals = []; // Paper trading signals { timestamp, entry_price, direction, setup_type }
+        this.selectedSignalIdx = null; // Selected signal index for SL/TP/Channel display
         this.currentPrice = null;
         this.channel = null; // { support, resistance, support_touches, resistance_touches }
 
@@ -164,6 +166,12 @@ export class FootprintChart {
     setChannel(channel) {
         // channel: { support, resistance, support_touches, resistance_touches, width_pct }
         this.channel = channel;
+        this.requestDraw();
+    }
+
+    setTradeSignals(signals) {
+        // signals: [{ timestamp, entry_price, direction, setup_type }, ...]
+        this.tradeSignals = signals || [];
         this.requestDraw();
     }
 
@@ -403,30 +411,35 @@ export class FootprintChart {
             ctx.fillStyle = this.colors.bg;
             ctx.fillRect(0, 0, width, height);
 
-            if (this.showHeatmap) this._drawHeatmap(ctx);
-            this._drawGrid(ctx); // Grid behind profile?
+            // When a signal is selected, show only trade-related elements
+            const signalFocusMode = this.selectedSignalIdx !== null;
+
+            if (!signalFocusMode && this.showHeatmap) this._drawHeatmap(ctx);
+            this._drawGrid(ctx); // Grid always visible for reference
 
             // Draw Profile BEHIND candles? or On Top?
             // Usually Profile is subtle background on the right.
-            if (this.showSessionProfile) this._drawSessionProfile(ctx);
+            if (!signalFocusMode && this.showSessionProfile) this._drawSessionProfile(ctx);
 
-            // Draw ML Channel (Support/Resistance)
-            if (this.showChannel) this._drawChannel(ctx);
+            // Draw ML Channel (Support/Resistance) - hide in focus mode
+            if (!signalFocusMode && this.showChannel) this._drawChannel(ctx);
 
             this._drawCandles(ctx);
 
-            // Draw Bottom Panels
-            if (this.showDelta) this._drawDeltaSummary(ctx);
-            if (this.showCVD) this._drawCVD(ctx);
+            // Draw Bottom Panels - hide in focus mode
+            if (!signalFocusMode && this.showDelta) this._drawDeltaSummary(ctx);
+            if (!signalFocusMode && this.showCVD) this._drawCVD(ctx);
 
-            this._drawPriceLine(ctx);
-            if (this.showBigTrades) this._drawBigTrades(ctx);
+            if (!signalFocusMode) this._drawPriceLine(ctx);
+            if (!signalFocusMode && this.showBigTrades) this._drawBigTrades(ctx);
+            this._drawTradeSignals(ctx); // Paper trading entry markers
+            this._drawSelectedSignalDetails(ctx); // Selected signal SL/TP/Channel lines
             if (this.showCrosshair && this.crosshairX) this._drawCrosshair(ctx);
-            if (this.showLens) this._drawLens(ctx);
+            if (!signalFocusMode && this.showLens) this._drawLens(ctx);
 
             // Wall Attack (Always On or toggle? User asked for it, lets keep it always on or tied to ML)
             // Let's tie it to 'showML' flag for now, or just always show if heavy wall nearby.
-            if (this.showML) {
+            if (!signalFocusMode && this.showML) {
                 this._drawWallAttack(ctx); // Existing HUD
                 this._drawTradePlan(ctx);  // NEW Trade Lines
             }
@@ -595,6 +608,264 @@ export class FootprintChart {
             ctx.globalAlpha = 0.05;
             ctx.fillStyle = '#06b6d4'; // Cyan tint
             ctx.fillRect(0, resistanceY, width, supportY - resistanceY);
+        }
+
+        ctx.restore();
+    }
+
+    _drawTradeSignals(ctx) {
+        if (!this.tradeSignals || this.tradeSignals.length === 0) return;
+        if (!this.candles || this.candles.length === 0) return;
+
+        const { width, height } = this;
+        const deltaH = this._deltaH();
+
+        for (const signal of this.tradeSignals) {
+            // Find candle index by timestamp
+            const signalTime = new Date(signal.timestamp).getTime();
+            let candleIdx = -1;
+
+            for (let i = 0; i < this.candles.length; i++) {
+                const candleTime = this.candles[i].time;
+                if (candleTime >= signalTime) {
+                    candleIdx = i;
+                    break;
+                }
+            }
+
+            if (candleIdx < 0) continue;
+
+            const x = this._getX(candleIdx);
+            const y = this._getY(signal.entry_price);
+
+            // Culling
+            if (x < 0 || x > width || y < 0 || y > height - deltaH) continue;
+
+            const isLong = signal.direction === 'LONG';
+            const color = isLong ? '#00e676' : '#ff1744';
+            const bgColor = isLong ? 'rgba(0, 230, 118, 0.2)' : 'rgba(255, 23, 68, 0.2)';
+
+            // Draw entry marker (triangle)
+            ctx.beginPath();
+            ctx.fillStyle = color;
+            if (isLong) {
+                // Up triangle for LONG
+                ctx.moveTo(x, y - 12);
+                ctx.lineTo(x - 8, y + 4);
+                ctx.lineTo(x + 8, y + 4);
+            } else {
+                // Down triangle for SHORT
+                ctx.moveTo(x, y + 12);
+                ctx.lineTo(x - 8, y - 4);
+                ctx.lineTo(x + 8, y - 4);
+            }
+            ctx.closePath();
+            ctx.fill();
+
+            // Draw setup type label
+            const setupType = signal.setup_type || 'SIGNAL';
+            ctx.font = 'bold 9px monospace';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'bottom';
+
+            const labelY = isLong ? y - 16 : y + 20;
+            const textWidth = ctx.measureText(setupType).width;
+
+            // Label background
+            ctx.fillStyle = bgColor;
+            ctx.fillRect(x - textWidth / 2 - 4, labelY - 10, textWidth + 8, 12);
+
+            // Label text
+            ctx.fillStyle = color;
+            ctx.fillText(setupType, x, labelY);
+
+            // Draw entry price line (dotted horizontal)
+            ctx.beginPath();
+            ctx.strokeStyle = color;
+            ctx.setLineDash([3, 3]);
+            ctx.lineWidth = 1;
+            ctx.globalAlpha = 0.5;
+            ctx.moveTo(x, y);
+            ctx.lineTo(width - 60, y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.globalAlpha = 1.0;
+        }
+    }
+
+    _handleSignalClick(mouseX, mouseY) {
+        if (!this.tradeSignals || this.tradeSignals.length === 0) return false;
+        if (!this.candles || this.candles.length === 0) return false;
+
+        const { width, height } = this;
+        const deltaH = this._deltaH();
+
+        for (let i = 0; i < this.tradeSignals.length; i++) {
+            const signal = this.tradeSignals[i];
+
+            // Find candle index by timestamp
+            const signalTime = new Date(signal.timestamp).getTime();
+            let candleIdx = -1;
+
+            for (let j = 0; j < this.candles.length; j++) {
+                const candleTime = this.candles[j].time;
+                if (candleTime >= signalTime) {
+                    candleIdx = j;
+                    break;
+                }
+            }
+
+            if (candleIdx < 0) continue;
+
+            const signalX = this._getX(candleIdx);
+            const signalY = this._getY(signal.entry_price);
+
+            // Culling
+            if (signalX < 0 || signalX > width || signalY < 0 || signalY > height - deltaH) continue;
+
+            // Check click distance (15px radius)
+            const dist = Math.sqrt((mouseX - signalX) ** 2 + (mouseY - signalY) ** 2);
+            if (dist < 15) {
+                // Toggle: same signal = deselect, different = select
+                this.selectedSignalIdx = (this.selectedSignalIdx === i) ? null : i;
+                this.requestDraw();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    _drawSelectedSignalDetails(ctx) {
+        if (this.selectedSignalIdx === null) return;
+        if (!this.tradeSignals || this.selectedSignalIdx >= this.tradeSignals.length) {
+            this.selectedSignalIdx = null;
+            return;
+        }
+
+        const signal = this.tradeSignals[this.selectedSignalIdx];
+        const { width, height } = this;
+        const deltaH = this._deltaH();
+
+        ctx.save();
+
+        // Draw Channel Support (dashed blue)
+        if (signal.channel_support) {
+            const supportY = this._getY(signal.channel_support);
+            if (supportY > 0 && supportY < height - deltaH) {
+                ctx.globalAlpha = 0.7;
+                ctx.strokeStyle = '#3b82f6'; // Blue
+                ctx.lineWidth = 1.5;
+                ctx.setLineDash([4, 4]);
+                ctx.beginPath();
+                ctx.moveTo(0, supportY);
+                ctx.lineTo(width - 60, supportY);
+                ctx.stroke();
+                ctx.setLineDash([]);
+
+                // Label
+                ctx.font = 'bold 10px monospace';
+                ctx.fillStyle = '#3b82f6';
+                ctx.textAlign = 'right';
+                ctx.fillText(`CH-S ${signal.channel_support.toLocaleString()}`, width - 65, supportY + 4);
+            }
+        }
+
+        // Draw Channel Resistance (dashed blue)
+        if (signal.channel_resistance) {
+            const resistanceY = this._getY(signal.channel_resistance);
+            if (resistanceY > 0 && resistanceY < height - deltaH) {
+                ctx.globalAlpha = 0.7;
+                ctx.strokeStyle = '#3b82f6'; // Blue
+                ctx.lineWidth = 1.5;
+                ctx.setLineDash([4, 4]);
+                ctx.beginPath();
+                ctx.moveTo(0, resistanceY);
+                ctx.lineTo(width - 60, resistanceY);
+                ctx.stroke();
+                ctx.setLineDash([]);
+
+                // Label
+                ctx.font = 'bold 10px monospace';
+                ctx.fillStyle = '#3b82f6';
+                ctx.textAlign = 'right';
+                ctx.fillText(`CH-R ${signal.channel_resistance.toLocaleString()}`, width - 65, resistanceY + 4);
+            }
+        }
+
+        // Draw SL (solid red)
+        if (signal.sl_price) {
+            const slY = this._getY(signal.sl_price);
+            if (slY > 0 && slY < height - deltaH) {
+                ctx.globalAlpha = 0.9;
+                ctx.strokeStyle = '#ef4444'; // Red
+                ctx.lineWidth = 2;
+                ctx.setLineDash([]);
+                ctx.beginPath();
+                ctx.moveTo(0, slY);
+                ctx.lineTo(width - 60, slY);
+                ctx.stroke();
+
+                // Label with background
+                ctx.font = 'bold 10px monospace';
+                const slText = `SL ${signal.sl_price.toLocaleString()}`;
+                const slTextWidth = ctx.measureText(slText).width;
+                ctx.fillStyle = 'rgba(239, 68, 68, 0.3)';
+                ctx.fillRect(width - 65 - slTextWidth - 4, slY - 7, slTextWidth + 8, 14);
+                ctx.fillStyle = '#ef4444';
+                ctx.textAlign = 'right';
+                ctx.fillText(slText, width - 65, slY + 4);
+            }
+        }
+
+        // Draw TP1 (solid green)
+        if (signal.tp1_price) {
+            const tp1Y = this._getY(signal.tp1_price);
+            if (tp1Y > 0 && tp1Y < height - deltaH) {
+                ctx.globalAlpha = 0.9;
+                ctx.strokeStyle = '#10b981'; // Green
+                ctx.lineWidth = 2;
+                ctx.setLineDash([]);
+                ctx.beginPath();
+                ctx.moveTo(0, tp1Y);
+                ctx.lineTo(width - 60, tp1Y);
+                ctx.stroke();
+
+                // Label with background
+                ctx.font = 'bold 10px monospace';
+                const tp1Text = `TP1 ${signal.tp1_price.toLocaleString()}`;
+                const tp1TextWidth = ctx.measureText(tp1Text).width;
+                ctx.fillStyle = 'rgba(16, 185, 129, 0.3)';
+                ctx.fillRect(width - 65 - tp1TextWidth - 4, tp1Y - 7, tp1TextWidth + 8, 14);
+                ctx.fillStyle = '#10b981';
+                ctx.textAlign = 'right';
+                ctx.fillText(tp1Text, width - 65, tp1Y + 4);
+            }
+        }
+
+        // Draw TP2 (dashed green)
+        if (signal.tp2_price) {
+            const tp2Y = this._getY(signal.tp2_price);
+            if (tp2Y > 0 && tp2Y < height - deltaH) {
+                ctx.globalAlpha = 0.7;
+                ctx.strokeStyle = '#10b981'; // Green
+                ctx.lineWidth = 1.5;
+                ctx.setLineDash([6, 3]);
+                ctx.beginPath();
+                ctx.moveTo(0, tp2Y);
+                ctx.lineTo(width - 60, tp2Y);
+                ctx.stroke();
+                ctx.setLineDash([]);
+
+                // Label with background
+                ctx.font = 'bold 10px monospace';
+                const tp2Text = `TP2 ${signal.tp2_price.toLocaleString()}`;
+                const tp2TextWidth = ctx.measureText(tp2Text).width;
+                ctx.fillStyle = 'rgba(16, 185, 129, 0.2)';
+                ctx.fillRect(width - 65 - tp2TextWidth - 4, tp2Y - 7, tp2TextWidth + 8, 14);
+                ctx.fillStyle = '#10b981';
+                ctx.textAlign = 'right';
+                ctx.fillText(tp2Text, width - 65, tp2Y + 4);
+            }
         }
 
         ctx.restore();
@@ -2044,6 +2315,11 @@ export class FootprintChart {
         const x = e.clientX - rect.left;
         const y = e.clientY - rect.top;
         const { width, height } = this;
+
+        // Check if clicking on a trade signal marker
+        if (this._handleSignalClick(x, y)) {
+            return; // Don't start drag
+        }
 
         // Check if clicking on a wall marker
         if (this._wallZones && this._wallZones.length > 0) {
