@@ -383,7 +383,7 @@ class MLPaperTradingService:
         if len(df) == 0:
             return pd.DataFrame()
 
-        df['time'] = pd.to_datetime(df['time'])
+        df['time'] = pd.to_datetime(df['time'], unit='ms')
         df = df.sort_values('time').reset_index(drop=True)
         return df
 
