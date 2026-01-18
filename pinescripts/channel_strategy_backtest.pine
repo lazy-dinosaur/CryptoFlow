@@ -1,0 +1,225 @@
+//@version=5
+strategy("Channel Strategy Backtest (1H+15m)", overlay=true,
+     initial_capital=10000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100,
+     commission_type=strategy.commission.percent,
+     commission_value=0.04,
+     slippage=1)
+
+// === INPUTS ===
+htf = input.timeframe("60", "HTF (Channel Detection)")
+swingLen = input.int(3, "Swing Length", minval=1)
+minChannelWidth = input.float(0.8, "Min Channel Width %", minval=0.1) / 100
+maxChannelWidth = input.float(5.0, "Max Channel Width %", minval=1.0) / 100
+touchTolerance = input.float(0.4, "Touch Tolerance %", minval=0.1) / 100
+slBuffer = input.float(0.2, "SL Buffer %", minval=0.01) / 100
+
+// Strategy options
+useBounce = input.bool(true, "Use BOUNCE entries")
+useFakeout = input.bool(false, "Use FAKEOUT entries")  // Default off since avg PnL is negative
+tp1Pct = input.float(50, "TP1 at % of channel", minval=10, maxval=90) / 100
+tp1CloseQty = input.float(50, "Close % at TP1", minval=10, maxval=90) / 100
+
+// === HTF DATA ===
+htfHigh = request.security(syminfo.tickerid, htf, high[1], lookahead=barmerge.lookahead_on)
+htfLow = request.security(syminfo.tickerid, htf, low[1], lookahead=barmerge.lookahead_on)
+htfClose = request.security(syminfo.tickerid, htf, close[1], lookahead=barmerge.lookahead_on)
+
+// === SWING DETECTION (on HTF) ===
+// We detect swings on HTF and request them
+htfSwingHigh = request.security(syminfo.tickerid, htf, ta.pivothigh(high, swingLen, swingLen)[1], lookahead=barmerge.lookahead_on)
+htfSwingLow = request.security(syminfo.tickerid, htf, ta.pivotlow(low, swingLen, swingLen)[1], lookahead=barmerge.lookahead_on)
+
+// Track recent swing highs and lows
+var float[] swingHighs = array.new_float(10, na)
+var float[] swingLows = array.new_float(10, na)
+
+// Update swing arrays when new swings detected
+if not na(htfSwingHigh)
+    array.unshift(swingHighs, htfSwingHigh)
+    if array.size(swingHighs) > 10
+        array.pop(swingHighs)
+
+if not na(htfSwingLow)
+    array.unshift(swingLows, htfSwingLow)
+    if array.size(swingLows) > 10
+        array.pop(swingLows)
+
+// === CHANNEL DETECTION ===
+var float support = na
+var float resistance = na
+var int supportTouches = 0
+var int resistanceTouches = 0
+var bool channelConfirmed = false
+
+// Find best channel from recent swings
+findChannel() =>
+    float bestSupport = na
+    float bestResistance = na
+    int bestScore = 0
+    bool confirmed = false
+    int sTouches = 0
+    int rTouches = 0
+
+    // Try combinations of swing highs and lows
+    for i = 0 to math.min(4, array.size(swingHighs) - 1)
+        for j = 0 to math.min(4, array.size(swingLows) - 1)
+            float sh = array.get(swingHighs, i)
+            float sl = array.get(swingLows, j)
+
+            if na(sh) or na(sl) or sh <= sl
+                continue
+
+            float widthPct = (sh - sl) / sl
+            if widthPct < minChannelWidth or widthPct > maxChannelWidth
+                continue
+
+            // Check if current price is within channel range
+            if close < sl * 0.98 or close > sh * 1.02
+                continue
+
+            // Count touches
+            int sCount = 0
+            int rCount = 0
+
+            for k = 0 to array.size(swingLows) - 1
+                float testLow = array.get(swingLows, k)
+                if not na(testLow) and math.abs(testLow - sl) / sl < touchTolerance
+                    sCount += 1
+
+            for k = 0 to array.size(swingHighs) - 1
+                float testHigh = array.get(swingHighs, k)
+                if not na(testHigh) and math.abs(testHigh - sh) / sh < touchTolerance
+                    rCount += 1
+
+            bool isConfirmed = sCount >= 2 and rCount >= 2
+            int score = sCount + rCount
+
+            if isConfirmed and score > bestScore
+                bestScore := score
+                bestSupport := sl
+                bestResistance := sh
+                confirmed := true
+                sTouches := sCount
+                rTouches := rCount
+
+    [bestSupport, bestResistance, confirmed, sTouches, rTouches]
+
+[newSupport, newResistance, newConfirmed, newSTouches, newRTouches] = findChannel()
+
+if not na(newSupport) and not na(newResistance)
+    support := newSupport
+    resistance := newResistance
+    channelConfirmed := newConfirmed
+    supportTouches := newSTouches
+    resistanceTouches := newRTouches
+
+// === FAKEOUT TRACKING ===
+var bool brokeSupport = false
+var bool brokeResistance = false
+var float fakeoutExtremeLow = na
+var float fakeoutExtremeHigh = na
+
+if channelConfirmed
+    // Track support break
+    if close < support * 0.997
+        brokeSupport := true
+        fakeoutExtremeLow := na(fakeoutExtremeLow) ? low : math.min(fakeoutExtremeLow, low)
+
+    // Track resistance break
+    if close > resistance * 1.003
+        brokeResistance := true
+        fakeoutExtremeHigh := na(fakeoutExtremeHigh) ? high : math.max(fakeoutExtremeHigh, high)
+
+// === ENTRY CONDITIONS ===
+channelHeight = resistance - support
+midChannel = (support + resistance) / 2
+
+// BOUNCE Long: Touch support, close above
+bounceLongCond = useBounce and channelConfirmed and
+                 low <= support and close > support and
+                 not brokeSupport
+
+// BOUNCE Short: Touch resistance, close below
+bounceShortCond = useBounce and channelConfirmed and
+                  high >= resistance and close < resistance and
+                  not brokeResistance
+
+// FAKEOUT Long: Was below support, now closed above
+fakeoutLongCond = useFakeout and channelConfirmed and
+                  brokeSupport and close > support
+
+// FAKEOUT Short: Was above resistance, now closed below
+fakeoutShortCond = useFakeout and channelConfirmed and
+                   brokeResistance and close < resistance
+
+// === CALCULATE TP/SL ===
+// Long
+longEntry = close
+longSL_bounce = low * (1 - slBuffer)
+longSL_fakeout = nz(fakeoutExtremeLow, low) * (1 - slBuffer)
+longTP1 = support + channelHeight * tp1Pct
+longTP2 = resistance
+
+// Short
+shortEntry = close
+shortSL_bounce = high * (1 + slBuffer)
+shortSL_fakeout = nz(fakeoutExtremeHigh, high) * (1 + slBuffer)
+shortTP1 = resistance - channelHeight * tp1Pct
+shortTP2 = support
+
+// === STRATEGY ENTRIES ===
+if bounceLongCond and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+    strategy.exit("TP1", "Long", qty_percent=tp1CloseQty, limit=longTP1, stop=longSL_bounce)
+    strategy.exit("TP2", "Long", limit=longTP2, stop=longSL_bounce)
+
+if bounceShortCond and strategy.position_size == 0
+    strategy.entry("Short", strategy.short)
+    strategy.exit("TP1", "Short", qty_percent=tp1CloseQty, limit=shortTP1, stop=shortSL_bounce)
+    strategy.exit("TP2", "Short", limit=shortTP2, stop=shortSL_bounce)
+
+if fakeoutLongCond and strategy.position_size == 0
+    strategy.entry("Long FO", strategy.long)
+    strategy.exit("TP1", "Long FO", qty_percent=tp1CloseQty, limit=longTP1, stop=longSL_fakeout)
+    strategy.exit("TP2", "Long FO", limit=longTP2, stop=longSL_fakeout)
+    brokeSupport := false
+    fakeoutExtremeLow := na
+
+if fakeoutShortCond and strategy.position_size == 0
+    strategy.entry("Short FO", strategy.short)
+    strategy.exit("TP1", "Short FO", qty_percent=tp1CloseQty, limit=shortTP1, stop=shortSL_fakeout)
+    strategy.exit("TP2", "Short FO", limit=shortTP2, stop=shortSL_fakeout)
+    brokeResistance := false
+    fakeoutExtremeHigh := na
+
+// === VISUALIZATION ===
+// Channel lines
+plot(channelConfirmed ? support : na, "Support", color=color.green, linewidth=2, style=plot.style_stepline)
+plot(channelConfirmed ? resistance : na, "Resistance", color=color.red, linewidth=2, style=plot.style_stepline)
+plot(channelConfirmed ? midChannel : na, "Mid", color=color.gray, linewidth=1, style=plot.style_stepline)
+
+// Channel background
+bgcolor(channelConfirmed and close > support and close < resistance ? color.new(color.blue, 95) : na)
+
+// Entry signals
+plotshape(bounceLongCond, "Bounce Long", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(bounceShortCond, "Bounce Short", shape.triangledown, location.abovebar, color.red, size=size.small)
+plotshape(fakeoutLongCond, "Fakeout Long", shape.triangleup, location.belowbar, color.lime, size=size.normal)
+plotshape(fakeoutShortCond, "Fakeout Short", shape.triangledown, location.abovebar, color.orange, size=size.normal)
+
+// Info table
+var table infoTable = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 80))
+if barstate.islast
+    table.cell(infoTable, 0, 0, "Channel", text_color=color.white)
+    table.cell(infoTable, 1, 0, channelConfirmed ? "Confirmed" : "Not Found", text_color=channelConfirmed ? color.green : color.red)
+    table.cell(infoTable, 0, 1, "Support", text_color=color.white)
+    table.cell(infoTable, 1, 1, str.tostring(support, "#.0") + " (" + str.tostring(supportTouches) + ")", text_color=color.green)
+    table.cell(infoTable, 0, 2, "Resistance", text_color=color.white)
+    table.cell(infoTable, 1, 2, str.tostring(resistance, "#.0") + " (" + str.tostring(resistanceTouches) + ")", text_color=color.red)
+    table.cell(infoTable, 0, 3, "Width", text_color=color.white)
+    table.cell(infoTable, 1, 3, str.tostring((resistance - support) / support * 100, "#.2") + "%", text_color=color.white)
+    table.cell(infoTable, 0, 4, "Position", text_color=color.white)
+    table.cell(infoTable, 1, 4, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT",
+               text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray)

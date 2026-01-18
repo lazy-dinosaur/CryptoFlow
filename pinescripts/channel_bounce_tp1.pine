@@ -1,0 +1,159 @@
+//@version=5
+strategy("Channel Bounce Strategy (TP1 100%)", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital=10000)
+
+// ===== INPUTS =====
+confirmCandles = input.int(3, "Confirm Candles", minval=1, maxval=10)
+minTouches = input.int(2, "Min Touches for Channel", minval=1, maxval=10)
+channelTolerance = input.float(0.4, "Channel Tolerance %", minval=0.1, maxval=2.0, step=0.1)
+touchThreshold = input.float(0.3, "Touch Threshold %", minval=0.1, maxval=1.0, step=0.1)
+slBufferPct = input.float(0.08, "SL Buffer %", minval=0.01, maxval=0.5, step=0.01)
+
+// ===== SWING POINT DETECTION =====
+var float potentialHighPrice = high
+var int potentialHighIdx = 0
+var int candlesSinceHigh = 0
+
+var float potentialLowPrice = low
+var int potentialLowIdx = 0
+var int candlesSinceLow = 0
+
+var float[] swingHighs = array.new_float(0)
+var int[] swingHighBars = array.new_int(0)
+var float[] swingLows = array.new_float(0)
+var int[] swingLowBars = array.new_int(0)
+
+// Update potential high
+if high > potentialHighPrice
+    potentialHighPrice := high
+    potentialHighIdx := bar_index
+    candlesSinceHigh := 0
+else
+    candlesSinceHigh += 1
+    if candlesSinceHigh == confirmCandles
+        array.push(swingHighs, potentialHighPrice)
+        array.push(swingHighBars, potentialHighIdx)
+        potentialHighPrice := high
+        potentialHighIdx := bar_index
+        candlesSinceHigh := 0
+
+// Update potential low
+if low < potentialLowPrice
+    potentialLowPrice := low
+    potentialLowIdx := bar_index
+    candlesSinceLow := 0
+else
+    candlesSinceLow += 1
+    if candlesSinceLow == confirmCandles
+        array.push(swingLows, potentialLowPrice)
+        array.push(swingLowBars, potentialLowIdx)
+        potentialLowPrice := low
+        potentialLowIdx := bar_index
+        candlesSinceLow := 0
+
+// Keep only recent swings (last 50)
+if array.size(swingHighs) > 50
+    array.shift(swingHighs)
+    array.shift(swingHighBars)
+if array.size(swingLows) > 50
+    array.shift(swingLows)
+    array.shift(swingLowBars)
+
+// ===== CHANNEL DETECTION =====
+var float channelSupport = na
+var float channelResistance = na
+var int supportTouches = 0
+var int resistanceTouches = 0
+
+// Find channel from recent swing points
+detectChannel() =>
+    float bestSupport = na
+    float bestResistance = na
+    int bestSupportTouches = 0
+    int bestResistanceTouches = 0
+
+    if array.size(swingLows) >= minTouches and array.size(swingHighs) >= minTouches
+        // Find support level (cluster of swing lows)
+        for i = 0 to math.min(array.size(swingLows) - 1, 19)
+            float level = array.get(swingLows, array.size(swingLows) - 1 - i)
+            int touches = 0
+            for j = 0 to math.min(array.size(swingLows) - 1, 19)
+                float otherLevel = array.get(swingLows, array.size(swingLows) - 1 - j)
+                if math.abs(otherLevel - level) / level * 100 < channelTolerance
+                    touches += 1
+            if touches >= minTouches and touches > bestSupportTouches
+                bestSupportTouches := touches
+                bestSupport := level
+
+        // Find resistance level (cluster of swing highs)
+        for i = 0 to math.min(array.size(swingHighs) - 1, 19)
+            float level = array.get(swingHighs, array.size(swingHighs) - 1 - i)
+            int touches = 0
+            for j = 0 to math.min(array.size(swingHighs) - 1, 19)
+                float otherLevel = array.get(swingHighs, array.size(swingHighs) - 1 - j)
+                if math.abs(otherLevel - level) / level * 100 < channelTolerance
+                    touches += 1
+            if touches >= minTouches and touches > bestResistanceTouches
+                bestResistanceTouches := touches
+                bestResistance := level
+
+    [bestSupport, bestResistance, bestSupportTouches, bestResistanceTouches]
+
+[newSupport, newResistance, sTouches, rTouches] = detectChannel()
+
+if not na(newSupport) and not na(newResistance) and newResistance > newSupport
+    float width = (newResistance - newSupport) / newSupport * 100
+    if width >= 0.5 and width <= 3.0  // Valid channel width
+        channelSupport := newSupport
+        channelResistance := newResistance
+        supportTouches := sTouches
+        resistanceTouches := rTouches
+
+// ===== ENTRY CONDITIONS =====
+float mid = (channelSupport + channelResistance) / 2
+bool validChannel = not na(channelSupport) and not na(channelResistance)
+
+// Support bounce (LONG)
+float supportTouchZone = channelSupport * (1 + touchThreshold / 100)
+bool touchedSupport = low <= supportTouchZone and close > channelSupport
+bool longCondition = validChannel and touchedSupport and strategy.position_size == 0
+
+// Resistance bounce (SHORT)
+float resistanceTouchZone = channelResistance * (1 - touchThreshold / 100)
+bool touchedResistance = high >= resistanceTouchZone and close < channelResistance
+bool shortCondition = validChannel and touchedResistance and strategy.position_size == 0
+
+// ===== STRATEGY EXECUTION =====
+if longCondition
+    float sl = channelSupport * (1 - slBufferPct / 100)
+    float tp = mid
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=sl, limit=tp)
+
+if shortCondition
+    float sl = channelResistance * (1 + slBufferPct / 100)
+    float tp = mid
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=sl, limit=tp)
+
+// ===== PLOTTING =====
+plot(validChannel ? channelSupport : na, "Support", color=color.new(color.green, 30), linewidth=2, style=plot.style_stepline)
+plot(validChannel ? channelResistance : na, "Resistance", color=color.new(color.red, 30), linewidth=2, style=plot.style_stepline)
+plot(validChannel ? mid : na, "Mid", color=color.new(color.gray, 50), linewidth=1, style=plot.style_stepline)
+
+// Entry markers
+plotshape(longCondition, "Long Signal", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(shortCondition, "Short Signal", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+// Info table
+var table infoTable = table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 80))
+if barstate.islast and validChannel
+    table.cell(infoTable, 0, 0, "Support", text_color=color.white)
+    table.cell(infoTable, 1, 0, str.tostring(channelSupport, "#.##"), text_color=color.green)
+    table.cell(infoTable, 0, 1, "Resistance", text_color=color.white)
+    table.cell(infoTable, 1, 1, str.tostring(channelResistance, "#.##"), text_color=color.red)
+    table.cell(infoTable, 0, 2, "Width", text_color=color.white)
+    table.cell(infoTable, 1, 2, str.tostring((channelResistance - channelSupport) / channelSupport * 100, "#.##") + "%", text_color=color.white)
+    table.cell(infoTable, 0, 3, "S Touches", text_color=color.white)
+    table.cell(infoTable, 1, 3, str.tostring(supportTouches), text_color=color.green)
+    table.cell(infoTable, 0, 4, "R Touches", text_color=color.white)
+    table.cell(infoTable, 1, 4, str.tostring(resistanceTouches), text_color=color.red)

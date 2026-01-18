@@ -1,0 +1,263 @@
+//@version=5
+// ============================================================================
+// Channel BOUNCE Strategy (1H Channel + 15m Entry)
+// Run this on 15m chart!
+// Based on ml_channel_tiebreaker_proper.py with lookahead bias fix
+// FAKEOUT removed (negative avg PnL)
+// ============================================================================
+strategy("Channel BOUNCE Strategy [1H+15m]", overlay=true,
+     initial_capital=10000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100,
+     commission_type=strategy.commission.percent,
+     commission_value=0.04,
+     slippage=1,
+     calc_on_every_tick=false)
+
+// === INPUTS ===
+htf = input.timeframe("60", "HTF for Channel Detection (60 = 1H)")
+swingLen = input.int(3, "Swing Length", minval=1, maxval=10)
+minChannelWidth = input.float(0.8, "Min Channel Width %", minval=0.1, step=0.1) / 100
+maxChannelWidth = input.float(5.0, "Max Channel Width %", minval=1.0, step=0.5) / 100
+touchTolerance = input.float(0.4, "Touch Tolerance %", minval=0.1, step=0.1) / 100
+slBufferPct = input.float(0.2, "SL Buffer %", minval=0.01, step=0.05) / 100
+
+// TP Settings
+tp1Pct = input.float(50, "TP1 at % of channel", minval=10, maxval=90) / 100
+useBreakeven = input.bool(true, "Move SL to Breakeven after TP1")
+
+// === HTF SWING DETECTION ===
+// Get HTF pivot highs and lows (using [1] to avoid lookahead bias)
+htfPivotHigh = request.security(syminfo.tickerid, htf, ta.pivothigh(high, swingLen, swingLen)[1], lookahead=barmerge.lookahead_on)
+htfPivotLow = request.security(syminfo.tickerid, htf, ta.pivotlow(low, swingLen, swingLen)[1], lookahead=barmerge.lookahead_on)
+
+// Store recent swings
+var float[] recentHighs = array.new_float(10, na)
+var float[] recentLows = array.new_float(10, na)
+
+if not na(htfPivotHigh)
+    array.unshift(recentHighs, htfPivotHigh)
+    if array.size(recentHighs) > 10
+        array.pop(recentHighs)
+
+if not na(htfPivotLow)
+    array.unshift(recentLows, htfPivotLow)
+    if array.size(recentLows) > 10
+        array.pop(recentLows)
+
+// === CHANNEL DETECTION ===
+var float channelSupport = na
+var float channelResistance = na
+var bool isChannelConfirmed = false
+var int supTouches = 0
+var int resTouches = 0
+
+// Find best confirmed channel
+detectChannel() =>
+    float bestSup = na
+    float bestRes = na
+    int bestScore = 0
+    bool confirmed = false
+    int sTouch = 0
+    int rTouch = 0
+
+    int maxI = math.min(5, array.size(recentHighs) - 1)
+    int maxJ = math.min(5, array.size(recentLows) - 1)
+
+    if maxI >= 0 and maxJ >= 0
+        for i = 0 to maxI
+            for j = 0 to maxJ
+                float rLevel = array.get(recentHighs, i)
+                float sLevel = array.get(recentLows, j)
+
+                if na(rLevel) or na(sLevel) or rLevel <= sLevel
+                    continue
+
+                float width = (rLevel - sLevel) / sLevel
+                if width < minChannelWidth or width > maxChannelWidth
+                    continue
+
+                // Price must be within channel
+                if close < sLevel * 0.98 or close > rLevel * 1.02
+                    continue
+
+                // Count touches
+                int sc = 0
+                int rc = 0
+
+                for k = 0 to array.size(recentLows) - 1
+                    float testVal = array.get(recentLows, k)
+                    if not na(testVal) and math.abs(testVal - sLevel) / sLevel < touchTolerance
+                        sc += 1
+
+                for k = 0 to array.size(recentHighs) - 1
+                    float testVal = array.get(recentHighs, k)
+                    if not na(testVal) and math.abs(testVal - rLevel) / rLevel < touchTolerance
+                        rc += 1
+
+                bool isConf = sc >= 2 and rc >= 2
+                int score = sc + rc
+
+                if isConf and score > bestScore
+                    bestScore := score
+                    bestSup := sLevel
+                    bestRes := rLevel
+                    confirmed := true
+                    sTouch := sc
+                    rTouch := rc
+
+    [bestSup, bestRes, confirmed, sTouch, rTouch]
+
+[newSup, newRes, newConf, newST, newRT] = detectChannel()
+
+if not na(newSup) and not na(newRes)
+    channelSupport := newSup
+    channelResistance := newRes
+    isChannelConfirmed := newConf
+    supTouches := newST
+    resTouches := newRT
+
+// === ENTRY CONDITIONS (BOUNCE ONLY) ===
+float chHeight = channelResistance - channelSupport
+float chMid = (channelSupport + channelResistance) / 2
+
+// Track if we already broke support/resistance (invalidates bounce)
+var bool invalidatedSupport = false
+var bool invalidatedResistance = false
+
+if isChannelConfirmed
+    if close < channelSupport * 0.997
+        invalidatedSupport := true
+    if close > channelResistance * 1.003
+        invalidatedResistance := true
+    // Reset when price returns to mid
+    if close > chMid and close < channelResistance
+        invalidatedSupport := false
+    if close < chMid and close > channelSupport
+        invalidatedResistance := false
+
+// BOUNCE Long: Touch support, close above, not invalidated
+bool bounceLong = isChannelConfirmed and
+                  low <= channelSupport and
+                  close > channelSupport and
+                  not invalidatedSupport and
+                  strategy.position_size == 0
+
+// BOUNCE Short: Touch resistance, close below, not invalidated
+bool bounceShort = isChannelConfirmed and
+                   high >= channelResistance and
+                   close < channelResistance and
+                   not invalidatedResistance and
+                   strategy.position_size == 0
+
+// === POSITION MANAGEMENT ===
+var float entryPrice = na
+var float stopLoss = na
+var float takeProfit1 = na
+var float takeProfit2 = na
+var bool hitTP1 = false
+var bool isLong = false
+
+// Entry
+if bounceLong
+    entryPrice := close
+    stopLoss := low * (1 - slBufferPct)
+    takeProfit1 := channelSupport + chHeight * tp1Pct
+    takeProfit2 := channelResistance
+    hitTP1 := false
+    isLong := true
+    strategy.entry("Long", strategy.long)
+
+if bounceShort
+    entryPrice := close
+    stopLoss := high * (1 + slBufferPct)
+    takeProfit1 := channelResistance - chHeight * tp1Pct
+    takeProfit2 := channelSupport
+    hitTP1 := false
+    isLong := false
+    strategy.entry("Short", strategy.short)
+
+// Exit management with proper TP1 -> Breakeven logic
+if strategy.position_size != 0
+    if isLong
+        // Initial exit: TP1 partial + original SL
+        if not hitTP1
+            strategy.exit("TP1_Long", "Long", qty_percent=50, limit=takeProfit1, stop=stopLoss)
+
+        // Check if TP1 was hit (position reduced)
+        if strategy.position_size > 0 and strategy.position_size < strategy.position_size[1] and not hitTP1
+            hitTP1 := true
+            if useBreakeven
+                stopLoss := entryPrice
+
+        // After TP1: TP2 + Breakeven SL
+        if hitTP1
+            strategy.exit("TP2_Long", "Long", limit=takeProfit2, stop=stopLoss)
+
+    else  // Short
+        // Initial exit: TP1 partial + original SL
+        if not hitTP1
+            strategy.exit("TP1_Short", "Short", qty_percent=50, limit=takeProfit1, stop=stopLoss)
+
+        // Check if TP1 was hit (position reduced)
+        if strategy.position_size < 0 and math.abs(strategy.position_size) < math.abs(strategy.position_size[1]) and not hitTP1
+            hitTP1 := true
+            if useBreakeven
+                stopLoss := entryPrice
+
+        // After TP1: TP2 + Breakeven SL
+        if hitTP1
+            strategy.exit("TP2_Short", "Short", limit=takeProfit2, stop=stopLoss)
+
+// Reset on position close
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    entryPrice := na
+    stopLoss := na
+    takeProfit1 := na
+    takeProfit2 := na
+    hitTP1 := false
+
+// === VISUALIZATION ===
+// Channel
+plot(isChannelConfirmed ? channelSupport : na, "Support", color=color.green, linewidth=2, style=plot.style_stepline)
+plot(isChannelConfirmed ? channelResistance : na, "Resistance", color=color.red, linewidth=2, style=plot.style_stepline)
+plot(isChannelConfirmed ? chMid : na, "Mid", color=color.gray, linewidth=1, style=plot.style_stepline)
+
+// Position levels
+plot(strategy.position_size != 0 ? entryPrice : na, "Entry", color=color.blue, linewidth=1, style=plot.style_linebr)
+plot(strategy.position_size != 0 ? stopLoss : na, "SL", color=color.red, linewidth=1, style=plot.style_linebr)
+plot(strategy.position_size != 0 ? takeProfit1 : na, "TP1", color=color.orange, linewidth=1, style=plot.style_linebr)
+plot(strategy.position_size != 0 ? takeProfit2 : na, "TP2", color=color.green, linewidth=1, style=plot.style_linebr)
+
+// Entry signals
+plotshape(bounceLong, "Long Signal", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(bounceShort, "Short Signal", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+// Background
+bgcolor(isChannelConfirmed ? color.new(color.blue, 95) : na)
+
+// Info Table
+var table infoTbl = table.new(position.top_right, 2, 7, bgcolor=color.new(color.black, 85))
+if barstate.islast
+    table.cell(infoTbl, 0, 0, "Status", text_color=color.white, text_size=size.small)
+    table.cell(infoTbl, 1, 0, isChannelConfirmed ? "CONFIRMED" : "NO CHANNEL",
+               text_color=isChannelConfirmed ? color.green : color.red, text_size=size.small)
+    table.cell(infoTbl, 0, 1, "Support", text_color=color.white, text_size=size.small)
+    table.cell(infoTbl, 1, 1, str.tostring(channelSupport, "#") + " (" + str.tostring(supTouches) + "t)",
+               text_color=color.green, text_size=size.small)
+    table.cell(infoTbl, 0, 2, "Resistance", text_color=color.white, text_size=size.small)
+    table.cell(infoTbl, 1, 2, str.tostring(channelResistance, "#") + " (" + str.tostring(resTouches) + "t)",
+               text_color=color.red, text_size=size.small)
+    table.cell(infoTbl, 0, 3, "Width", text_color=color.white, text_size=size.small)
+    table.cell(infoTbl, 1, 3, str.tostring(chHeight / channelSupport * 100, "#.1") + "%",
+               text_color=color.white, text_size=size.small)
+    table.cell(infoTbl, 0, 4, "Position", text_color=color.white, text_size=size.small)
+    table.cell(infoTbl, 1, 4, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT",
+               text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray,
+               text_size=size.small)
+    table.cell(infoTbl, 0, 5, "TP1 Hit", text_color=color.white, text_size=size.small)
+    table.cell(infoTbl, 1, 5, hitTP1 ? "YES" : "NO",
+               text_color=hitTP1 ? color.green : color.gray, text_size=size.small)
+    table.cell(infoTbl, 0, 6, "Timeframe", text_color=color.white, text_size=size.small)
+    table.cell(infoTbl, 1, 6, "HTF:" + htf + " LTF:" + timeframe.period,
+               text_color=color.yellow, text_size=size.small)
