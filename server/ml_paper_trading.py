@@ -1270,7 +1270,9 @@ class MLPaperTradingService:
         mid_price = (channel.resistance + channel.support) / 2
 
         # Check for bounce signals on COMPLETED candle
-        signal_key = f"{round(channel.support)}_{round(channel.resistance)}_{completed_candle_time}"
+        # Cooldown: same channel, same setup for 20 candles (5 hours) - matches backtest
+        SIGNAL_COOLDOWN_MS = 20 * 15 * 60 * 1000  # 20 x 15min = 5 hours
+        signal_key = f"{round(channel.support)}_{round(channel.resistance)}_{completed_candle_time // SIGNAL_COOLDOWN_MS}"
         if not hasattr(self, 'recent_signals'):
             self.recent_signals = set()
 
