@@ -922,14 +922,8 @@ class MLPaperTradingService:
         current_close = df_15m['close'].iloc[-1]
         current_high = df_15m['high'].iloc[-1]
         current_low = df_15m['low'].iloc[-1]
-        current_time = df_15m['time'].iloc[-1] if 'time' in df_15m.columns else datetime.now()
-        # Convert to Unix timestamp in milliseconds for consistency with frontend candles
-        if hasattr(current_time, 'timestamp'):
-            current_time_ms = int(current_time.timestamp() * 1000)
-        elif isinstance(current_time, (int, float)):
-            current_time_ms = int(current_time)
-        else:
-            current_time_ms = int(datetime.now().timestamp() * 1000)
+        # Always use current time for signal timestamp (more reliable than candle time)
+        current_time_ms = int(datetime.now().timestamp() * 1000)
 
         # Save current price for API
         self.last_price = current_close
