@@ -82,17 +82,19 @@ class Signal:
 class Trade:
     signal_id: int
     strategy: str  # NO_ML, ML_ENTRY, ML_COMBINED
-    timestamp: str
+    timestamp: int  # milliseconds
     direction: str
     setup_type: str
     entry_price: float
     sl_price: float
     tp1_price: float
     tp2_price: float
+    channel_support: float
+    channel_resistance: float
     status: str = 'ACTIVE'  # ACTIVE, TP1_HIT, TP2_HIT, SL_HIT, BE_HIT
     exit_decision: str = ''  # EXIT or HOLD (for ML_COMBINED)
     pnl_pct: float = 0.0
-    closed_at: str = ''
+    closed_at: int = 0  # milliseconds
     db_id: int = 0
     tp1_profit_taken: bool = False  # Track if TP1 profit has been added to capital
 
@@ -114,7 +116,7 @@ class MLPaperTradingService:
     def __init__(self):
         self.running = False
         self.channels: Dict[int, Channel] = {}
-        self.pending_fakeouts: Dict[int, dict] = {}
+        self.pending_fakeouts: Dict[str, dict] = {}
 
         # 3 strategies
         self.strategies = {
@@ -178,17 +180,20 @@ class MLPaperTradingService:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             signal_id INTEGER,
             strategy TEXT,
-            timestamp TEXT,
+            timestamp INTEGER,
             direction TEXT,
             setup_type TEXT,
             entry_price REAL,
             sl_price REAL,
             tp1_price REAL,
             tp2_price REAL,
+            channel_support REAL,
+            channel_resistance REAL,
             status TEXT,
             exit_decision TEXT,
             pnl_pct REAL,
-            closed_at TEXT,
+            closed_at INTEGER,
+            tp1_profit_taken INTEGER DEFAULT 0,
             FOREIGN KEY (signal_id) REFERENCES signals(id)
         )''')
 
@@ -244,26 +249,30 @@ class MLPaperTradingService:
                 # Load active trades (status != closed)
                 for strategy_name, state in self.strategies.items():
                     c.execute('''SELECT id, signal_id, strategy, timestamp, direction, setup_type,
-                                        entry_price, sl_price, tp1_price, tp2_price, status, exit_decision, pnl_pct, closed_at
+                                        entry_price, sl_price, tp1_price, tp2_price,
+                                        channel_support, channel_resistance,
+                                        status, exit_decision, pnl_pct, closed_at, tp1_profit_taken
                                  FROM trades WHERE strategy = ? AND status IN ('ACTIVE', 'TP1_HIT')''',
                               (strategy_name,))
                     for row in c.fetchall():
                         trade = Trade(
                             signal_id=row[1],
                             strategy=row[2],
-                            timestamp=row[3],
+                            timestamp=row[3] or 0,
                             direction=row[4],
                             setup_type=row[5],
                             entry_price=row[6],
                             sl_price=row[7],
                             tp1_price=row[8],
                             tp2_price=row[9],
-                            status=row[10],
-                            exit_decision=row[11] or '',
-                            pnl_pct=row[12] or 0.0,
-                            closed_at=row[13] or '',
+                            channel_support=row[10] or 0.0,
+                            channel_resistance=row[11] or 0.0,
+                            status=row[12],
+                            exit_decision=row[13] or '',
+                            pnl_pct=row[14] or 0.0,
+                            closed_at=row[15] or 0,
                             db_id=row[0],
-                            tp1_profit_taken=(row[10] == 'TP1_HIT')  # If status is TP1_HIT, profit was taken
+                            tp1_profit_taken=bool(row[16]) if row[16] is not None else False
                         )
                         state.active_trades.append(trade)
                         print(f"[LOAD] Restored active trade: {trade.direction} {trade.setup_type} @ {trade.entry_price:.2f} ({trade.status})")
@@ -288,7 +297,7 @@ class MLPaperTradingService:
         signal_id = c.lastrowid
         conn.commit()
         conn.close()
-        return signal_id
+        return signal_id if signal_id is not None else 0
 
     def _save_trade(self, trade: Trade) -> int:
         """Save trade to database."""
@@ -296,23 +305,27 @@ class MLPaperTradingService:
         c = conn.cursor()
         c.execute('''INSERT INTO trades
             (signal_id, strategy, timestamp, direction, setup_type, entry_price, sl_price,
-             tp1_price, tp2_price, status, exit_decision, pnl_pct, closed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+             tp1_price, tp2_price, channel_support, channel_resistance, status,
+             exit_decision, pnl_pct, closed_at, tp1_profit_taken)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (trade.signal_id, trade.strategy, trade.timestamp, trade.direction,
              trade.setup_type, trade.entry_price, trade.sl_price, trade.tp1_price,
-             trade.tp2_price, trade.status, trade.exit_decision, trade.pnl_pct, trade.closed_at))
+             trade.tp2_price, trade.channel_support, trade.channel_resistance, trade.status,
+             trade.exit_decision, trade.pnl_pct, trade.closed_at,
+             1 if trade.tp1_profit_taken else 0))
         trade_id = c.lastrowid
         conn.commit()
         conn.close()
-        return trade_id
+        return trade_id if trade_id is not None else 0
 
     def _update_trade(self, trade: Trade):
         """Update trade in database."""
         conn = sqlite3.connect(PAPER_DB_PATH)
         c = conn.cursor()
-        c.execute('''UPDATE trades SET status=?, exit_decision=?, pnl_pct=?, closed_at=?
+        c.execute('''UPDATE trades SET status=?, exit_decision=?, pnl_pct=?, closed_at=?, tp1_profit_taken=?
             WHERE id=?''',
-            (trade.status, trade.exit_decision, trade.pnl_pct, trade.closed_at, trade.db_id))
+            (trade.status, trade.exit_decision, trade.pnl_pct, trade.closed_at,
+             1 if trade.tp1_profit_taken else 0, trade.db_id))
         conn.commit()
         conn.close()
 
@@ -356,7 +369,7 @@ class MLPaperTradingService:
         return df
 
     def _extract_entry_features(self, df_15m: pd.DataFrame, idx: int, channel: Channel,
-                                 direction: str, setup_type: str, fakeout_extreme: float = None) -> np.ndarray:
+                                 direction: str, setup_type: str, fakeout_extreme: Optional[float] = None) -> np.ndarray:
         """Extract features for entry model."""
         closes = df_15m['close'].values
         highs = df_15m['high'].values
@@ -542,10 +555,11 @@ class MLPaperTradingService:
         self.signal_counter += 1
         signal_id = self._save_signal(signal)
 
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        now_ms = int(datetime.now().timestamp() * 1000)
+        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         print(f"\n{'='*60}")
         print(f"[SIGNAL #{self.signal_counter}] {signal.direction} {signal.setup_type}")
-        print(f"  Time: {now}")
+        print(f"  Time: {now_str}")
         print(f"  Entry: {signal.entry_price:.2f}")
         print(f"  SL: {signal.sl_price:.2f} | TP1: {signal.tp1_price:.2f} | TP2: {signal.tp2_price:.2f}")
         print(f"  ML Entry Prob: {signal.entry_prob:.1%}")
@@ -555,13 +569,15 @@ class MLPaperTradingService:
         trade_no_ml = Trade(
             signal_id=signal_id,
             strategy='NO_ML',
-            timestamp=now,
+            timestamp=now_ms,
             direction=signal.direction,
             setup_type=signal.setup_type,
             entry_price=signal.entry_price,
             sl_price=signal.sl_price,
             tp1_price=signal.tp1_price,
-            tp2_price=signal.tp2_price
+            tp2_price=signal.tp2_price,
+            channel_support=signal.channel_support,
+            channel_resistance=signal.channel_resistance
         )
         trade_no_ml.db_id = self._save_trade(trade_no_ml)
         self.strategies['NO_ML'].active_trades.append(trade_no_ml)
@@ -574,13 +590,15 @@ class MLPaperTradingService:
             trade_ml_entry = Trade(
                 signal_id=signal_id,
                 strategy='ML_ENTRY',
-                timestamp=now,
+                timestamp=now_ms,
                 direction=signal.direction,
                 setup_type=signal.setup_type,
                 entry_price=signal.entry_price,
                 sl_price=signal.sl_price,
                 tp1_price=signal.tp1_price,
-                tp2_price=signal.tp2_price
+                tp2_price=signal.tp2_price,
+                channel_support=signal.channel_support,
+                channel_resistance=signal.channel_resistance
             )
             trade_ml_entry.db_id = self._save_trade(trade_ml_entry)
             self.strategies['ML_ENTRY'].active_trades.append(trade_ml_entry)
@@ -591,13 +609,15 @@ class MLPaperTradingService:
             trade_ml_combined = Trade(
                 signal_id=signal_id,
                 strategy='ML_COMBINED',
-                timestamp=now,
+                timestamp=now_ms,
                 direction=signal.direction,
                 setup_type=signal.setup_type,
                 entry_price=signal.entry_price,
                 sl_price=signal.sl_price,
                 tp1_price=signal.tp1_price,
-                tp2_price=signal.tp2_price
+                tp2_price=signal.tp2_price,
+                channel_support=signal.channel_support,
+                channel_resistance=signal.channel_resistance
             )
             trade_ml_combined.db_id = self._save_trade(trade_ml_combined)
             self.strategies['ML_COMBINED'].active_trades.append(trade_ml_combined)
@@ -608,9 +628,9 @@ class MLPaperTradingService:
             print(f"  [ML_COMBINED] SKIPPED")
 
     def _update_trades(self, current_price: float, current_high: float, current_low: float,
-                       df_15m: pd.DataFrame = None, current_idx: int = None):
+                       df_15m: Optional[pd.DataFrame] = None, current_idx: Optional[int] = None):
         """Update all active trades with current price."""
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        now_ms = int(datetime.now().timestamp() * 1000)
 
         for strategy_name, state in self.strategies.items():
             trades_to_remove = []
@@ -689,7 +709,7 @@ class MLPaperTradingService:
 
                 if closed:
                     trade.pnl_pct = pnl_pct
-                    trade.closed_at = now
+                    trade.closed_at = now_ms
 
                     # Update capital for remaining position
                     sl_dist = abs(trade.entry_price - trade.sl_price) / trade.entry_price
@@ -1090,14 +1110,20 @@ class MLPaperTradingService:
                                 unrealized_pnl = (trade.entry_price - current_price) / trade.entry_price * 100
 
                             active_trade_details.append({
+                                'signal_id': trade.signal_id,
                                 'direction': trade.direction,
                                 'setup_type': trade.setup_type,
                                 'entry_price': round(trade.entry_price, 2),
                                 'sl_price': round(trade.sl_price, 2),
                                 'tp1_price': round(trade.tp1_price, 2),
                                 'tp2_price': round(trade.tp2_price, 2),
+                                'channel_support': round(trade.channel_support, 2),
+                                'channel_resistance': round(trade.channel_resistance, 2),
                                 'status': trade.status,
                                 'timestamp': trade.timestamp,
+                                'exit_decision': trade.exit_decision,
+                                'pnl_pct': round(trade.pnl_pct, 4),
+                                'tp1_profit_taken': trade.tp1_profit_taken,
                                 'unrealized_pnl': round(unrealized_pnl, 2)
                             })
 
@@ -1118,7 +1144,7 @@ class MLPaperTradingService:
                     try:
                         conn = sqlite3.connect(PAPER_DB_PATH)
                         c = conn.cursor()
-                        c.execute('''SELECT timestamp, direction, setup_type, entry_price, sl_price, tp1_price, tp2_price, entry_prob
+                        c.execute('''SELECT timestamp, direction, setup_type, entry_price, sl_price, tp1_price, tp2_price, entry_prob, channel_support, channel_resistance
                                      FROM signals ORDER BY id DESC LIMIT 10''')
                         recent_signals = []
                         for row in c.fetchall():
@@ -1136,7 +1162,9 @@ class MLPaperTradingService:
                                 'sl_price': row[4],
                                 'tp1_price': row[5],
                                 'tp2_price': row[6],
-                                'entry_prob': row[7]
+                                'entry_prob': row[7],
+                                'channel_support': row[8],
+                                'channel_resistance': row[9]
                             })
                         conn.close()
                         status['recent_signals'] = recent_signals
