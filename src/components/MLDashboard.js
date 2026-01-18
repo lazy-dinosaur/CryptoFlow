@@ -20,9 +20,18 @@ export class MLDashboard {
         this.signalFilter = 'ALL'; // ALL, LONG, SHORT
         this.activeMainTab = 'signals'; // 'signals' or 'paper'
         this.paperTradingData = null;
+        this.footprintChart = null; // Reference to FootprintChart
 
         this._init();
         this._startPolling();
+    }
+
+    /**
+     * Set reference to FootprintChart
+     * @param {FootprintChart} chart
+     */
+    setFootprintChart(chart) {
+        this.footprintChart = chart;
     }
 
     get isVisible() {
@@ -206,6 +215,53 @@ export class MLDashboard {
                 </div>
             `;
         }
+        // Active Trades Section (NO_ML strategy only for simplicity)
+        const noMlData = strategies['NO_ML'];
+        const activeTrades = noMlData?.active_trade_details || [];
+        if (activeTrades.length > 0) {
+            html += `
+                <div class="paper-active-trades">
+                    <div class="active-trades-header">🔥 Active Trades (${activeTrades.length})</div>
+            `;
+            for (const trade of activeTrades) {
+                const isLong = trade.direction === 'LONG';
+                const dirClass = isLong ? 'long' : 'short';
+                const dirIcon = isLong ? '📈' : '📉';
+                const pnlClass = trade.unrealized_pnl >= 0 ? 'positive' : 'negative';
+                const statusLabel = trade.status === 'TP1_HIT' ? '🎯 TP1 Hit (BE Active)' : '⏳ Active';
+
+                html += `
+                    <div class="active-trade-item ${dirClass}">
+                        <div class="active-trade-header">
+                            <span class="active-trade-dir ${dirClass}">${dirIcon} ${trade.direction}</span>
+                            <span class="active-trade-type">${trade.setup_type}</span>
+                            <span class="active-trade-pnl ${pnlClass}">${trade.unrealized_pnl >= 0 ? '+' : ''}${trade.unrealized_pnl.toFixed(2)}%</span>
+                        </div>
+                        <div class="active-trade-status">${statusLabel}</div>
+                        <div class="active-trade-prices">
+                            <div class="active-trade-price">
+                                <span class="label">Entry</span>
+                                <span class="value">${trade.entry_price.toLocaleString()}</span>
+                            </div>
+                            <div class="active-trade-price sl">
+                                <span class="label">SL</span>
+                                <span class="value">${trade.sl_price.toLocaleString()}</span>
+                            </div>
+                            <div class="active-trade-price tp">
+                                <span class="label">TP1</span>
+                                <span class="value">${trade.tp1_price.toLocaleString()}</span>
+                            </div>
+                            <div class="active-trade-price tp">
+                                <span class="label">TP2</span>
+                                <span class="value">${trade.tp2_price.toLocaleString()}</span>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+            html += `</div>`;
+        }
+
         for (const key of strategyOrder) {
             const data = strategies[key];
             if (!data) continue;
@@ -256,6 +312,64 @@ export class MLDashboard {
                 ${bestKey && bestReturn > 0 ? `Best: ${strategyLabels[bestKey]} (+${bestReturn.toFixed(1)}%)` : 'Waiting for trades...'}
             </div>
         `;
+
+        // Recent Signals section
+        const recentSignals = this.paperTradingData.recent_signals || [];
+        if (recentSignals.length > 0) {
+            html += `
+                <div class="paper-signals-section">
+                    <div class="paper-signals-header">📋 Recent Signals</div>
+                    <div class="paper-signals-list">
+            `;
+
+            for (const signal of recentSignals.slice(0, 5)) {
+                const isLong = signal.direction === 'LONG';
+                const dirClass = isLong ? 'long' : 'short';
+                const dirIcon = isLong ? '📈' : '📉';
+
+                // Setup type styling
+                const setupType = signal.setup_type || 'UNKNOWN';
+                const isPivot = setupType.includes('PIVOT');
+                const isFakeout = setupType.includes('FAKEOUT');
+                const setupClass = isPivot ? 'pivot' : (isFakeout ? 'fakeout' : 'bounce');
+
+                // Format timestamp
+                const time = new Date(signal.timestamp).toLocaleString('ko-KR', {
+                    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+                });
+
+                html += `
+                    <div class="paper-signal-item ${dirClass}">
+                        <div class="paper-signal-header">
+                            <span class="paper-signal-dir ${dirClass}">${dirIcon} ${signal.direction}</span>
+                            <span class="paper-signal-type ${setupClass}">${setupType}</span>
+                            <span class="paper-signal-time">${time}</span>
+                        </div>
+                        <div class="paper-signal-prices">
+                            <span>E: ${signal.entry_price?.toLocaleString() || '--'}</span>
+                            <span class="sl">SL: ${signal.sl_price?.toLocaleString() || '--'}</span>
+                            <span class="tp">TP1: ${signal.tp1_price?.toLocaleString() || '--'}</span>
+                            <span class="tp">TP2: ${signal.tp2_price?.toLocaleString() || '--'}</span>
+                        </div>
+                        <div class="paper-signal-prob">
+                            ML Prob: ${signal.entry_prob ? (signal.entry_prob * 100).toFixed(0) + '%' : '--'}
+                        </div>
+                    </div>
+                `;
+            }
+
+            html += `
+                    </div>
+                </div>
+            `;
+        } else {
+            html += `
+                <div class="paper-signals-section">
+                    <div class="paper-signals-header">📋 Recent Signals</div>
+                    <div class="paper-no-signals">No signals yet</div>
+                </div>
+            `;
+        }
 
         content.innerHTML = html;
     }
@@ -607,6 +721,201 @@ export class MLDashboard {
                 text-align: center;
                 color: #8899aa;
                 font-size: 11px;
+            }
+
+            /* Active Trades Styles */
+            .paper-active-trades {
+                margin-bottom: 12px;
+                padding: 10px;
+                background: rgba(255, 193, 7, 0.1);
+                border: 1px solid rgba(255, 193, 7, 0.3);
+                border-radius: 6px;
+            }
+
+            .active-trades-header {
+                font-size: 11px;
+                font-weight: 600;
+                margin-bottom: 8px;
+                color: #ffc107;
+            }
+
+            .active-trade-item {
+                padding: 10px;
+                margin-bottom: 8px;
+                background: rgba(255,255,255,0.05);
+                border-radius: 6px;
+                border-left: 3px solid #00e676;
+            }
+
+            .active-trade-item.short {
+                border-left-color: #ff5252;
+            }
+
+            .active-trade-item:last-child {
+                margin-bottom: 0;
+            }
+
+            .active-trade-header {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                margin-bottom: 4px;
+            }
+
+            .active-trade-dir {
+                font-weight: 700;
+                font-size: 11px;
+            }
+
+            .active-trade-dir.long { color: #00e676; }
+            .active-trade-dir.short { color: #ff5252; }
+
+            .active-trade-type {
+                padding: 2px 6px;
+                border-radius: 3px;
+                font-size: 9px;
+                font-weight: 600;
+                background: rgba(0, 150, 255, 0.2);
+                color: #00bcd4;
+            }
+
+            .active-trade-pnl {
+                margin-left: auto;
+                font-weight: 700;
+                font-size: 12px;
+            }
+
+            .active-trade-pnl.positive { color: #00e676; }
+            .active-trade-pnl.negative { color: #ff5252; }
+
+            .active-trade-status {
+                font-size: 10px;
+                color: #ffc107;
+                margin-bottom: 6px;
+            }
+
+            .active-trade-prices {
+                display: grid;
+                grid-template-columns: repeat(4, 1fr);
+                gap: 6px;
+                font-size: 10px;
+            }
+
+            .active-trade-price {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+            }
+
+            .active-trade-price .label {
+                color: #8899aa;
+                font-size: 9px;
+            }
+
+            .active-trade-price .value {
+                font-family: monospace;
+                color: #fff;
+            }
+
+            .active-trade-price.sl .value { color: #ff5252; }
+            .active-trade-price.tp .value { color: #00e676; }
+
+            /* Paper Trading Signals Styles */
+            .paper-signals-section {
+                margin-top: 12px;
+                padding-top: 10px;
+                border-top: 1px solid rgba(255,255,255,0.1);
+            }
+
+            .paper-signals-header {
+                font-size: 11px;
+                font-weight: 600;
+                margin-bottom: 8px;
+                color: #00bcd4;
+            }
+
+            .paper-signals-list {
+                display: flex;
+                flex-direction: column;
+                gap: 6px;
+            }
+
+            .paper-signal-item {
+                padding: 8px;
+                background: rgba(255,255,255,0.03);
+                border-radius: 4px;
+                border-left: 3px solid #00e676;
+            }
+
+            .paper-signal-item.short {
+                border-left-color: #ff5252;
+            }
+
+            .paper-signal-header {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                margin-bottom: 4px;
+            }
+
+            .paper-signal-dir {
+                font-weight: 700;
+                font-size: 10px;
+            }
+
+            .paper-signal-dir.long { color: #00e676; }
+            .paper-signal-dir.short { color: #ff5252; }
+
+            .paper-signal-type {
+                padding: 2px 6px;
+                border-radius: 3px;
+                font-size: 9px;
+                font-weight: 600;
+            }
+
+            .paper-signal-type.bounce {
+                background: rgba(0, 150, 255, 0.2);
+                color: #00bcd4;
+            }
+
+            .paper-signal-type.fakeout {
+                background: rgba(255, 193, 7, 0.2);
+                color: #ffc107;
+            }
+
+            .paper-signal-type.pivot {
+                background: rgba(156, 39, 176, 0.3);
+                color: #ce93d8;
+            }
+
+            .paper-signal-time {
+                margin-left: auto;
+                font-size: 9px;
+                color: #8899aa;
+            }
+
+            .paper-signal-prices {
+                display: flex;
+                gap: 10px;
+                font-size: 9px;
+                color: #ccc;
+                font-family: monospace;
+            }
+
+            .paper-signal-prices .sl { color: #ff5252; }
+            .paper-signal-prices .tp { color: #00e676; }
+
+            .paper-signal-prob {
+                margin-top: 4px;
+                font-size: 9px;
+                color: #8899aa;
+            }
+
+            .paper-no-signals {
+                text-align: center;
+                color: #8899aa;
+                font-size: 10px;
+                padding: 10px;
             }
 
             /* Signal List Styles */

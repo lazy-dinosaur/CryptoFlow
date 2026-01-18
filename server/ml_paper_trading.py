@@ -980,6 +980,29 @@ class MLPaperTradingService:
 
                     for name, state in service.strategies.items():
                         win_rate = state.wins / (state.wins + state.losses) * 100 if (state.wins + state.losses) > 0 else 0
+
+                        # Include active trade details
+                        active_trade_details = []
+                        for trade in state.active_trades:
+                            # Calculate unrealized P&L
+                            current_price = service.last_price if hasattr(service, 'last_price') and service.last_price else trade.entry_price
+                            if trade.direction == 'LONG':
+                                unrealized_pnl = (current_price - trade.entry_price) / trade.entry_price * 100
+                            else:
+                                unrealized_pnl = (trade.entry_price - current_price) / trade.entry_price * 100
+
+                            active_trade_details.append({
+                                'direction': trade.direction,
+                                'setup_type': trade.setup_type,
+                                'entry_price': round(trade.entry_price, 2),
+                                'sl_price': round(trade.sl_price, 2),
+                                'tp1_price': round(trade.tp1_price, 2),
+                                'tp2_price': round(trade.tp2_price, 2),
+                                'status': trade.status,
+                                'timestamp': trade.timestamp,
+                                'unrealized_pnl': round(unrealized_pnl, 2)
+                            })
+
                         status['strategies'][name] = {
                             'name': state.name,
                             'capital': round(state.capital, 2),
@@ -989,8 +1012,32 @@ class MLPaperTradingService:
                             'losses': state.losses,
                             'win_rate': round(win_rate, 1),
                             'max_drawdown': round(state.max_drawdown * 100, 1),
-                            'active_trades': len(state.active_trades)
+                            'active_trades': len(state.active_trades),
+                            'active_trade_details': active_trade_details
                         }
+
+                    # Add recent signals from database
+                    try:
+                        conn = sqlite3.connect(PAPER_DB_PATH)
+                        c = conn.cursor()
+                        c.execute('''SELECT timestamp, direction, setup_type, entry_price, sl_price, tp1_price, tp2_price, entry_prob
+                                     FROM signals ORDER BY id DESC LIMIT 10''')
+                        recent_signals = []
+                        for row in c.fetchall():
+                            recent_signals.append({
+                                'timestamp': row[0],
+                                'direction': row[1],
+                                'setup_type': row[2],
+                                'entry_price': row[3],
+                                'sl_price': row[4],
+                                'tp1_price': row[5],
+                                'tp2_price': row[6],
+                                'entry_prob': row[7]
+                            })
+                        conn.close()
+                        status['recent_signals'] = recent_signals
+                    except Exception as e:
+                        status['recent_signals'] = []
 
                     self.wfile.write(json.dumps(status, indent=2).encode())
                 else:
