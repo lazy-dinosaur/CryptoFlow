@@ -1,937 +1,835 @@
 #!/usr/bin/env python3
 """
-Multi-Timeframe Bounce Confirmation Backtest
+ML Multi-Timeframe Bounce Strategy with 1m Volume/Delta Pattern Filtering
 
-채널 감지: 1시간봉
-영역 진입 감지: 15분봉
-반등 확인 & 진입: 1분봉
+기반: ml_channel_tiebreaker_proper.py (NARROW tiebreaker)
+추가: 1분봉 볼륨/델타 패턴 ML 필터링
 
-전략 비교:
-1. NO_CONFIRM: 15분봉 영역 터치 + 마감 = 진입 (기존 방식)
-2. DELTA_CONFIRM: 1분봉에서 delta 반전 확인 후 진입
-3. WICK_CONFIRM: 1분봉에서 긴 꼬리 확인 후 진입
-4. DELTA_STRONG: delta 강한 확인 (threshold 높임)
+HTF (1H): Channel detection with evolving S/R
+LTF (15m): Entry execution
+1m: ML-based volume/delta pattern analysis for entry filtering
+
+Usage:
+    python ml_mtf_bounce.py          # Baseline only
+    python ml_mtf_bounce.py --ml     # Baseline + ML comparison
 """
 
-import pandas as pd
-import numpy as np
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import StandardScaler
-import joblib
 import os
-from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Tuple
-from datetime import datetime, timedelta
-import warnings
-warnings.filterwarnings('ignore')
+import sys
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass
+from typing import List, Dict, Tuple, Optional
+from tqdm import tqdm
+import joblib
+
+sys.path.insert(0, os.path.dirname(__file__))
+from parse_data import load_candles
+
+# Try to import ML features module
+try:
+    from ml_volume_delta_features import extract_1m_features, calculate_dynamic_sl, get_feature_names
+    HAS_ML_FEATURES = True
+except ImportError:
+    HAS_ML_FEATURES = False
+    print("[WARN] ml_volume_delta_features not found, ML features disabled")
 
 # ============== Configuration ==============
-DATA_DIR = "data/parsed/btcusdt"
+MODELS_DIR = "models"
+ML_ENTRY_THRESHOLD = 0.5
 
-# Channel detection params (1h)
-CHANNEL_LOOKBACK = 100  # 1h candles
-MIN_TOUCHES = 2
-TOUCH_TOLERANCE = 0.004  # 0.4%
-MIN_CHANNEL_WIDTH = 0.008  # 0.8%
-MAX_CHANNEL_WIDTH = 0.05  # 5%
 
-# Entry zone params (15m)
-ZONE_THRESHOLD = 0.003  # 0.3% from support/resistance
-
-# Trade params
-SL_BUFFER_PCT = 0.0008
-INITIAL_CAPITAL = 10000.0
-RISK_PCT = 0.015
-MAX_LEVERAGE = 15
-FEE_PCT = 0.0004
-
-# Bounce confirmation params (1m)
-DELTA_THRESHOLD = 50  # Minimum delta for confirmation
-DELTA_STRONG_THRESHOLD = 150  # Strong delta confirmation
-DELTA_LOOKBACK = 5    # 1m candles to check delta
-WICK_RATIO_THRESHOLD = 0.5  # Wick should be > 50% of candle range
-WICK_STRONG_RATIO = 0.65  # Strong wick rejection
-MAX_WAIT_CANDLES = 15  # Max 1m candles to wait for confirmation (15분)
-
-# Cooldown after loss
-COOLDOWN_CANDLES = 4  # 4 x 15m = 1 hour cooldown after loss
-
-# Trend filter
-MA_PERIOD = 50  # EMA period for trend filter
-
-# R:R filter
-MIN_RR_RATIO = 1.5  # Minimum risk:reward ratio for entry
+@dataclass
+class SwingPoint:
+    idx: int
+    price: float
+    type: str
 
 
 @dataclass
 class Channel:
     support: float
+    support_idx: int
     resistance: float
-    support_touches: int
-    resistance_touches: int
+    resistance_idx: int
+    lowest_low: float
+    highest_high: float
+    support_touches: int = 1
+    resistance_touches: int = 1
+    confirmed: bool = False
 
 
-@dataclass
-class Trade:
-    entry_time: datetime
-    direction: str  # LONG or SHORT
-    entry_price: float
-    sl_price: float
-    tp1_price: float
-    tp2_price: float
-    status: str = 'ACTIVE'
-    exit_time: Optional[datetime] = None
-    exit_price: float = 0.0
-    pnl_pct: float = 0.0
-    tp1_hit: bool = False
-
-
-@dataclass
-class Strategy:
-    name: str
-    capital: float = INITIAL_CAPITAL
-    trades: List[Trade] = field(default_factory=list)
-    active_trade: Optional[Trade] = None
-    wins: int = 0
-    losses: int = 0
-    total_pnl: float = 0.0
-    cooldown_until: int = 0  # Skip signals until this 15m candle index
-
-
-def load_data():
-    """Load all timeframe data."""
-    print("Loading data...")
-
-    df_1h = pd.read_parquet(f"{DATA_DIR}/candles_1h.parquet")
-    df_15m = pd.read_parquet(f"{DATA_DIR}/candles_15m.parquet")
-    df_1m = pd.read_parquet(f"{DATA_DIR}/candles_1m.parquet")
-
-    # Ensure time is datetime
-    for df in [df_1h, df_15m, df_1m]:
-        df['time'] = pd.to_datetime(df['time'])
-
-    print(f"  1h: {len(df_1h):,} candles ({df_1h['time'].min()} ~ {df_1h['time'].max()})")
-    print(f"  15m: {len(df_15m):,} candles")
-    print(f"  1m: {len(df_1m):,} candles")
-
-    return df_1h, df_15m, df_1m
-
-
-def find_swing_points(df: pd.DataFrame, confirm_candles: int = 3) -> Tuple[List[dict], List[dict]]:
-    """Find swing highs and lows."""
-    highs = df['high'].values
-    lows = df['low'].values
-    times = df['time'].values
+def find_swing_points(candles: pd.DataFrame, confirm_candles: int = 3) -> Tuple[List[SwingPoint], List[SwingPoint]]:
+    """Find swing highs and lows on HTF."""
+    highs = candles['high'].values
+    lows = candles['low'].values
 
     swing_highs = []
     swing_lows = []
 
-    for i in range(confirm_candles, len(df) - confirm_candles):
-        # Swing high
-        if all(highs[i] > highs[i-j] for j in range(1, confirm_candles+1)) and \
-           all(highs[i] > highs[i+j] for j in range(1, confirm_candles+1)):
-            swing_highs.append({'idx': i, 'price': highs[i], 'time': times[i]})
+    potential_high_idx = 0
+    potential_high_price = highs[0]
+    candles_since_high = 0
 
-        # Swing low
-        if all(lows[i] < lows[i-j] for j in range(1, confirm_candles+1)) and \
-           all(lows[i] < lows[i+j] for j in range(1, confirm_candles+1)):
-            swing_lows.append({'idx': i, 'price': lows[i], 'time': times[i]})
+    potential_low_idx = 0
+    potential_low_price = lows[0]
+    candles_since_low = 0
+
+    for i in range(1, len(candles)):
+        if highs[i] > potential_high_price:
+            potential_high_idx = i
+            potential_high_price = highs[i]
+            candles_since_high = 0
+        else:
+            candles_since_high += 1
+            if candles_since_high == confirm_candles:
+                swing_highs.append(SwingPoint(idx=potential_high_idx, price=potential_high_price, type='high'))
+
+        if lows[i] < potential_low_price:
+            potential_low_idx = i
+            potential_low_price = lows[i]
+            candles_since_low = 0
+        else:
+            candles_since_low += 1
+            if candles_since_low == confirm_candles:
+                swing_lows.append(SwingPoint(idx=potential_low_idx, price=potential_low_price, type='low'))
+
+        if candles_since_high >= confirm_candles:
+            potential_high_price = highs[i]
+            potential_high_idx = i
+            candles_since_high = 0
+
+        if candles_since_low >= confirm_candles:
+            potential_low_price = lows[i]
+            potential_low_idx = i
+            candles_since_low = 0
 
     return swing_highs, swing_lows
 
 
-def detect_channel(df_1h: pd.DataFrame, end_idx: int) -> Optional[Channel]:
-    """Detect channel using 1h data up to end_idx."""
-    if end_idx < CHANNEL_LOOKBACK:
-        return None
-
-    df = df_1h.iloc[end_idx - CHANNEL_LOOKBACK:end_idx].copy()
-    swing_highs, swing_lows = find_swing_points(df)
-
-    if len(swing_highs) < 2 or len(swing_lows) < 2:
-        return None
-
-    current_price = df['close'].iloc[-1]
-    best_channel = None
-    best_score = -1
-
-    for sh in swing_highs[-10:]:
-        for sl in swing_lows[-10:]:
-            if sh['price'] <= sl['price']:
-                continue
-
-            width_pct = (sh['price'] - sl['price']) / sl['price']
-            if width_pct < MIN_CHANNEL_WIDTH or width_pct > MAX_CHANNEL_WIDTH:
-                continue
-
-            # Price should be within channel
-            if current_price < sl['price'] * 0.98 or current_price > sh['price'] * 1.02:
-                continue
-
-            # Count touches
-            support_touches = sum(1 for s in swing_lows
-                                  if abs(s['price'] - sl['price']) / sl['price'] < TOUCH_TOLERANCE)
-            resistance_touches = sum(1 for s in swing_highs
-                                     if abs(s['price'] - sh['price']) / sh['price'] < TOUCH_TOLERANCE)
-
-            if support_touches >= MIN_TOUCHES and resistance_touches >= MIN_TOUCHES:
-                score = support_touches + resistance_touches
-                if score > best_score:
-                    best_score = score
-                    best_channel = Channel(
-                        support=sl['price'],
-                        resistance=sh['price'],
-                        support_touches=support_touches,
-                        resistance_touches=resistance_touches
-                    )
-
-    return best_channel
-
-
-def check_zone_entry(candle: pd.Series, channel: Channel) -> Optional[str]:
-    """Check if 15m candle entered buy/sell zone."""
-    if channel is None:
-        return None
-
-    # Buy zone: low touched support area
-    if candle['low'] <= channel.support * (1 + ZONE_THRESHOLD) and candle['close'] > channel.support:
-        return 'LONG'
-
-    # Sell zone: high touched resistance area
-    if candle['high'] >= channel.resistance * (1 - ZONE_THRESHOLD) and candle['close'] < channel.resistance:
-        return 'SHORT'
-
-    return None
-
-
-def check_delta_confirmation(df_1m: pd.DataFrame, direction: str, threshold: float = DELTA_THRESHOLD) -> bool:
-    """Check if delta confirms bounce direction."""
-    if len(df_1m) < DELTA_LOOKBACK:
-        return False
-
-    recent_delta = df_1m['delta'].iloc[-DELTA_LOOKBACK:].sum()
-
-    if direction == 'LONG':
-        return recent_delta > threshold
-    else:  # SHORT
-        return recent_delta < -threshold
-
-
-def check_wick_confirmation(candle: pd.Series, direction: str) -> bool:
-    """Check if candle has rejection wick."""
-    candle_range = candle['high'] - candle['low']
-    if candle_range == 0:
-        return False
-
-    body_top = max(candle['open'], candle['close'])
-    body_bottom = min(candle['open'], candle['close'])
-
-    if direction == 'LONG':
-        # Lower wick should be long (rejection of lower prices)
-        lower_wick = body_bottom - candle['low']
-        return (lower_wick / candle_range) > WICK_RATIO_THRESHOLD
-    else:  # SHORT
-        # Upper wick should be long (rejection of higher prices)
-        upper_wick = candle['high'] - body_top
-        return (upper_wick / candle_range) > WICK_RATIO_THRESHOLD
-
-
-def check_rr_ratio(entry_price: float, direction: str, channel: Channel) -> float:
-    """Calculate risk:reward ratio for a potential trade."""
-    mid_price = (channel.resistance + channel.support) / 2
-
-    if direction == 'LONG':
-        sl = channel.support * (1 - SL_BUFFER_PCT)
-        tp1 = mid_price
-        risk = entry_price - sl
-        reward = tp1 - entry_price
-    else:
-        sl = channel.resistance * (1 + SL_BUFFER_PCT)
-        tp1 = mid_price
-        risk = sl - entry_price
-        reward = entry_price - tp1
-
-    if risk <= 0:
-        return 0
-
-    return reward / risk
-
-
-def create_trade(entry_time: datetime, direction: str, entry_price: float,
-                 channel: Channel, tp_style: str = 'channel') -> Trade:
-    """Create a new trade.
-
-    tp_style:
-      - 'channel': TP1=midpoint, TP2=opposite boundary
-      - 'fixed_1.5': TP1 at 1.5:1 R:R (single exit, no partial)
-      - 'fixed_2.0': TP1 at 2.0:1 R:R (single exit, no partial)
+def build_htf_channels(htf_candles: pd.DataFrame,
+                       max_channel_width: float = 0.05,
+                       min_channel_width: float = 0.008,
+                       touch_threshold: float = 0.004,
+                       tiebreaker: str = 'narrow') -> Dict[int, Channel]:
     """
-    if direction == 'LONG':
-        sl = channel.support * (1 - SL_BUFFER_PCT)
-        risk = entry_price - sl
-    else:
-        sl = channel.resistance * (1 + SL_BUFFER_PCT)
-        risk = sl - entry_price
+    Build evolving channels on HTF.
+    Returns dict mapping HTF candle index to active confirmed channel.
+    """
+    swing_highs, swing_lows = find_swing_points(htf_candles, confirm_candles=3)
 
-    mid_price = (channel.resistance + channel.support) / 2
+    print(f"  HTF Swing Highs: {len(swing_highs)}")
+    print(f"  HTF Swing Lows: {len(swing_lows)}")
 
-    if tp_style == 'fixed_1.5':
-        if direction == 'LONG':
-            tp1 = entry_price + risk * 1.5
-            tp2 = tp1  # No second target
+    closes = htf_candles['close'].values
+
+    active_channels: Dict[tuple, Channel] = {}
+    htf_channel_map: Dict[int, Channel] = {}
+
+    for i in range(len(htf_candles)):
+        current_close = closes[i]
+
+        new_high = None
+        new_low = None
+
+        for sh in swing_highs:
+            if sh.idx + 3 == i:
+                new_high = sh
+                break
+
+        for sl in swing_lows:
+            if sl.idx + 3 == i:
+                new_low = sl
+                break
+
+        valid_swing_lows = [sl for sl in swing_lows if sl.idx + 3 <= i]
+        valid_swing_highs = [sh for sh in swing_highs if sh.idx + 3 <= i]
+
+        if new_high:
+            for sl in valid_swing_lows[-30:]:
+                if sl.idx < new_high.idx - 100:
+                    continue
+                if new_high.price > sl.price:
+                    width_pct = (new_high.price - sl.price) / sl.price
+                    if min_channel_width <= width_pct <= max_channel_width:
+                        key = (new_high.idx, sl.idx)
+                        if key not in active_channels:
+                            active_channels[key] = Channel(
+                                support=sl.price,
+                                support_idx=sl.idx,
+                                resistance=new_high.price,
+                                resistance_idx=new_high.idx,
+                                lowest_low=sl.price,
+                                highest_high=new_high.price
+                            )
+
+        if new_low:
+            for sh in valid_swing_highs[-30:]:
+                if sh.idx < new_low.idx - 100:
+                    continue
+                if sh.price > new_low.price:
+                    width_pct = (sh.price - new_low.price) / new_low.price
+                    if min_channel_width <= width_pct <= max_channel_width:
+                        key = (sh.idx, new_low.idx)
+                        if key not in active_channels:
+                            active_channels[key] = Channel(
+                                support=new_low.price,
+                                support_idx=new_low.idx,
+                                resistance=sh.price,
+                                resistance_idx=sh.idx,
+                                lowest_low=new_low.price,
+                                highest_high=sh.price
+                            )
+
+        keys_to_remove = []
+        for key, channel in active_channels.items():
+            if current_close < channel.lowest_low * 0.96 or current_close > channel.highest_high * 1.04:
+                keys_to_remove.append(key)
+                continue
+
+            if new_low and new_low.price < channel.resistance:
+                if new_low.price < channel.lowest_low:
+                    channel.lowest_low = new_low.price
+                    channel.support = new_low.price
+                    channel.support_idx = new_low.idx
+                    channel.support_touches = 1
+                elif new_low.price > channel.lowest_low and new_low.price < channel.support:
+                    channel.support = new_low.price
+                    channel.support_idx = new_low.idx
+                    channel.support_touches += 1
+                elif abs(new_low.price - channel.support) / channel.support < touch_threshold:
+                    channel.support_touches += 1
+
+            if new_high and new_high.price > channel.support:
+                if new_high.price > channel.highest_high:
+                    channel.highest_high = new_high.price
+                    channel.resistance = new_high.price
+                    channel.resistance_idx = new_high.idx
+                    channel.resistance_touches = 1
+                elif new_high.price < channel.highest_high and new_high.price > channel.resistance:
+                    channel.resistance = new_high.price
+                    channel.resistance_idx = new_high.idx
+                    channel.resistance_touches += 1
+                elif abs(new_high.price - channel.resistance) / channel.resistance < touch_threshold:
+                    channel.resistance_touches += 1
+
+            if channel.support_touches >= 2 and channel.resistance_touches >= 2:
+                channel.confirmed = True
+
+            width_pct = (channel.resistance - channel.support) / channel.support
+            if width_pct > max_channel_width or width_pct < min_channel_width:
+                keys_to_remove.append(key)
+
+        for key in keys_to_remove:
+            del active_channels[key]
+
+        candidates = []
+        for key, channel in active_channels.items():
+            if not channel.confirmed:
+                continue
+            if current_close < channel.support * 0.98 or current_close > channel.resistance * 1.02:
+                continue
+            score = channel.support_touches + channel.resistance_touches
+            width_pct = (channel.resistance - channel.support) / channel.support
+            candidates.append((score, width_pct, channel))
+
+        if candidates:
+            max_score = max(c[0] for c in candidates)
+            top_candidates = [c for c in candidates if c[0] == max_score]
+
+            if len(top_candidates) == 1:
+                best_channel = top_candidates[0][2]
+            elif tiebreaker == 'narrow':
+                best_channel = min(top_candidates, key=lambda c: c[1])[2]
+            else:
+                best_channel = top_candidates[0][2]
+
+            htf_channel_map[i] = best_channel
+
+    confirmed_count = len(set(id(c) for c in htf_channel_map.values()))
+    print(f"  HTF Confirmed Channels: {confirmed_count}")
+
+    return htf_channel_map
+
+
+def simulate_trade(candles, idx, trade_type, entry_price, sl_price, tp1_price, tp2_price,
+                   channel, volumes, deltas, avg_volume, avg_delta, cvd_recent, opens, closes):
+    """Simulate trade with partial TP + breakeven."""
+    highs = candles['high'].values
+    lows = candles['low'].values
+
+    risk = abs(entry_price - sl_price)
+    reward1 = abs(tp1_price - entry_price)
+    reward2 = abs(tp2_price - entry_price)
+    rr_ratio = reward2 / risk if risk > 0 else 0
+
+    outcome = 0
+    pnl_pct = 0
+    hit_tp1 = False
+    current_sl = sl_price
+
+    for j in range(idx + 1, min(idx + 150, len(candles))):
+        if trade_type == 'LONG':
+            if not hit_tp1:
+                if lows[j] <= current_sl:
+                    pnl_pct = -risk / entry_price
+                    break
+                if highs[j] >= tp1_price:
+                    pnl_pct += 0.5 * (reward1 / entry_price)
+                    hit_tp1 = True
+                    current_sl = entry_price
+            else:
+                if lows[j] <= current_sl:
+                    outcome = 0.5
+                    break
+                if highs[j] >= tp2_price:
+                    pnl_pct += 0.5 * (reward2 / entry_price)
+                    outcome = 1
+                    break
         else:
-            tp1 = entry_price - risk * 1.5
-            tp2 = tp1
-    elif tp_style == 'fixed_2.0':
-        if direction == 'LONG':
-            tp1 = entry_price + risk * 2.0
-            tp2 = tp1
-        else:
-            tp1 = entry_price - risk * 2.0
-            tp2 = tp1
-    else:  # 'channel'
-        if direction == 'LONG':
-            tp1 = mid_price
-            tp2 = channel.resistance * 0.998
-        else:
-            tp1 = mid_price
-            tp2 = channel.support * 1.002
+            if not hit_tp1:
+                if highs[j] >= current_sl:
+                    pnl_pct = -risk / entry_price
+                    break
+                if lows[j] <= tp1_price:
+                    pnl_pct += 0.5 * (reward1 / entry_price)
+                    hit_tp1 = True
+                    current_sl = entry_price
+            else:
+                if highs[j] >= current_sl:
+                    outcome = 0.5
+                    break
+                if lows[j] <= tp2_price:
+                    pnl_pct += 0.5 * (reward2 / entry_price)
+                    outcome = 1
+                    break
 
-    return Trade(
-        entry_time=entry_time,
-        direction=direction,
-        entry_price=entry_price,
-        sl_price=sl,
-        tp1_price=tp1,
-        tp2_price=tp2
-    )
+    width_pct = (channel.resistance - channel.support) / channel.support
 
-
-def update_trade(trade: Trade, candle: pd.Series) -> bool:
-    """Update trade with candle data. Returns True if trade closed."""
-    if trade.status != 'ACTIVE':
-        return False
-
-    is_long = trade.direction == 'LONG'
-
-    # Fixed R:R mode: TP1 == TP2 means single exit, no partial
-    is_fixed_rr = (trade.tp1_price == trade.tp2_price)
-
-    # Check SL
-    if is_long and candle['low'] <= trade.sl_price:
-        trade.status = 'SL_HIT'
-        trade.exit_price = trade.sl_price
-        trade.exit_time = candle['time']
-        trade.pnl_pct = (trade.sl_price - trade.entry_price) / trade.entry_price
-        if trade.tp1_hit and not is_fixed_rr:
-            trade.pnl_pct = 0.5 * trade.pnl_pct  # Only remaining 50%
-        return True
-    elif not is_long and candle['high'] >= trade.sl_price:
-        trade.status = 'SL_HIT'
-        trade.exit_price = trade.sl_price
-        trade.exit_time = candle['time']
-        trade.pnl_pct = (trade.entry_price - trade.sl_price) / trade.entry_price
-        if trade.tp1_hit and not is_fixed_rr:
-            trade.pnl_pct = 0.5 * trade.pnl_pct
-        return True
-
-    # Fixed R:R mode: single exit at TP
-    if is_fixed_rr:
-        if is_long and candle['high'] >= trade.tp1_price:
-            trade.status = 'TP_HIT'
-            trade.exit_price = trade.tp1_price
-            trade.exit_time = candle['time']
-            trade.pnl_pct = (trade.tp1_price - trade.entry_price) / trade.entry_price
-            trade.tp1_hit = True
-            return True
-        elif not is_long and candle['low'] <= trade.tp1_price:
-            trade.status = 'TP_HIT'
-            trade.exit_price = trade.tp1_price
-            trade.exit_time = candle['time']
-            trade.pnl_pct = (trade.entry_price - trade.tp1_price) / trade.entry_price
-            trade.tp1_hit = True
-            return True
-        return False
-
-    # Channel mode: partial exit at TP1, then TP2 or BE
-    # Check TP1
-    if not trade.tp1_hit:
-        if is_long and candle['high'] >= trade.tp1_price:
-            trade.tp1_hit = True
-            trade.sl_price = trade.entry_price  # Move SL to BE
-        elif not is_long and candle['low'] <= trade.tp1_price:
-            trade.tp1_hit = True
-            trade.sl_price = trade.entry_price
-
-    # Check TP2
-    if trade.tp1_hit:
-        if is_long and candle['high'] >= trade.tp2_price:
-            trade.status = 'TP2_HIT'
-            trade.exit_price = trade.tp2_price
-            trade.exit_time = candle['time']
-            trade.pnl_pct = 0.5 * (trade.tp2_price - trade.entry_price) / trade.entry_price
-            return True
-        elif not is_long and candle['low'] <= trade.tp2_price:
-            trade.status = 'TP2_HIT'
-            trade.exit_price = trade.tp2_price
-            trade.exit_time = candle['time']
-            trade.pnl_pct = 0.5 * (trade.entry_price - trade.tp2_price) / trade.entry_price
-            return True
-
-        # Check BE (after TP1)
-        if is_long and candle['low'] <= trade.entry_price:
-            trade.status = 'BE_HIT'
-            trade.exit_price = trade.entry_price
-            trade.exit_time = candle['time']
-            trade.pnl_pct = 0
-            return True
-        elif not is_long and candle['high'] >= trade.entry_price:
-            trade.status = 'BE_HIT'
-            trade.exit_price = trade.entry_price
-            trade.exit_time = candle['time']
-            trade.pnl_pct = 0
-            return True
-
-    return False
-
-
-def calculate_pnl(trade: Trade, capital: float) -> float:
-    """Calculate PnL in dollars."""
-    # Calculate original SL distance (before any BE move)
-    if trade.direction == 'LONG':
-        # For long, original SL was below entry
-        sl_dist = abs(trade.entry_price - trade.sl_price) / trade.entry_price
-        if trade.tp1_hit:
-            # If TP1 hit, SL was moved to BE, so use TP1 distance to estimate original SL
-            # Approximation: for channel trades, SL ~ entry - (TP1 - entry)
-            sl_dist = abs(trade.tp1_price - trade.entry_price) / trade.entry_price
-    else:
-        sl_dist = abs(trade.sl_price - trade.entry_price) / trade.entry_price
-        if trade.tp1_hit:
-            sl_dist = abs(trade.entry_price - trade.tp1_price) / trade.entry_price
-
-    leverage = min(RISK_PCT / sl_dist, MAX_LEVERAGE) if sl_dist > 0 else 1
-    position = capital * leverage
-
-    # Fixed R:R mode: single exit (TP1 == TP2)
-    is_fixed_rr = (trade.tp1_price == trade.tp2_price)
-    if is_fixed_rr:
-        return position * trade.pnl_pct - position * FEE_PCT * 2
-
-    # Channel mode: TP1 hit means 50% was already taken
-    if trade.tp1_hit and trade.status != 'SL_HIT':
-        tp1_pnl = 0.5 * abs(trade.tp1_price - trade.entry_price) / trade.entry_price
-        tp1_dollar = position * tp1_pnl - position * FEE_PCT
-        remaining_pnl = position * trade.pnl_pct - position * FEE_PCT
-        return tp1_dollar + remaining_pnl
-    else:
-        return position * trade.pnl_pct - position * FEE_PCT * 2
-
-
-def run_backtest(df_1h: pd.DataFrame, df_15m: pd.DataFrame, df_1m: pd.DataFrame,
-                 start_date: str = '2023-01-01', end_date: str = '2025-01-01'):
-    """Run multi-timeframe backtest."""
-
-    # Filter data
-    start_dt = pd.to_datetime(start_date)
-    end_dt = pd.to_datetime(end_date)
-
-    df_1h = df_1h[(df_1h['time'] >= start_dt) & (df_1h['time'] < end_dt)].reset_index(drop=True)
-    df_15m = df_15m[(df_15m['time'] >= start_dt) & (df_15m['time'] < end_dt)].reset_index(drop=True)
-    df_1m = df_1m[(df_1m['time'] >= start_dt) & (df_1m['time'] < end_dt)].reset_index(drop=True)
-
-    print(f"\nBacktest period: {start_date} ~ {end_date}")
-    print(f"  1h candles: {len(df_1h):,}")
-    print(f"  15m candles: {len(df_15m):,}")
-    print(f"  1m candles: {len(df_1m):,}")
-
-    # Initialize strategies
-    strategies = {
-        'NO_CONFIRM': Strategy(name='No Confirmation (15m close)'),
-        'DELTA_CONFIRM': Strategy(name='Delta Confirmation (1m)'),
-        'DELTA_STRONG': Strategy(name='Delta Strong (1m, threshold=150)'),
-        'WICK_CONFIRM': Strategy(name='Wick Confirmation (1m)'),
-        'COMBINED': Strategy(name='Delta + Wick Combined'),
-        'TREND_ALIGNED': Strategy(name='Trend Aligned (EMA50)'),
-        'LONG_ONLY': Strategy(name='Long Only (Delta)'),
-        'SHORT_ONLY': Strategy(name='Short Only (Delta)'),
-        'BEST_SETUP': Strategy(name='Trend+Delta+RR>=1.5'),
-        'TIGHT_CHANNEL': Strategy(name='Channel Width < 2.5%'),
-        'FIXED_RR': Strategy(name='Fixed 1.5:1 TP (no partial)'),
-        'TREND_FIXED_RR': Strategy(name='Trend+Fixed 2:1 TP'),
-        'TREND_1.5RR': Strategy(name='Trend+Fixed 1.5:1 TP'),
-        'TREND_LONG_ONLY': Strategy(name='Trend Long Only 1.5:1'),
-        'TREND_LONG_2RR': Strategy(name='Trend Long Only 2:1'),
-        'TREND_LONG_STRONG': Strategy(name='Trend Long Strong Delta'),
+    return {
+        'idx': idx,
+        'type': trade_type,
+        'setup_type': 'BOUNCE',
+        'entry': entry_price,
+        'sl': sl_price,
+        'tp1': tp1_price,
+        'tp2': tp2_price,
+        'rr_ratio': rr_ratio,
+        'pnl_pct': pnl_pct,
+        'channel_width': width_pct,
+        'total_touches': channel.support_touches + channel.resistance_touches,
+        'volume_at_entry': volumes[idx],
+        'volume_ratio': volumes[idx] / avg_volume if avg_volume > 0 else 1,
+        'delta_at_entry': deltas[idx],
+        'delta_ratio': deltas[idx] / (abs(avg_delta) + 1),
+        'cvd_recent': cvd_recent,
+        'body_bullish': 1 if closes[idx] > opens[idx] else 0,
+        'outcome': outcome
     }
 
-    # Calculate EMA for trend filter on 1h
-    df_1h['ema50'] = df_1h['close'].ewm(span=MA_PERIOD, adjust=False).mean()
 
-    # Build time index for 1m data
-    df_1m_indexed = df_1m.set_index('time')
+def collect_setups_baseline(htf_candles: pd.DataFrame,
+                            ltf_candles: pd.DataFrame,
+                            htf_tf: str = "1h",
+                            ltf_tf: str = "15m",
+                            touch_threshold: float = 0.003,
+                            sl_buffer_pct: float = 0.0008,
+                            quiet: bool = False,
+                            tiebreaker: str = 'narrow') -> List[dict]:
+    """
+    Collect setups using MTF analysis (same as ml_channel_tiebreaker_proper.py).
+    This is the BASELINE strategy.
+    """
+    htf_channel_map = build_htf_channels(htf_candles, tiebreaker=tiebreaker)
 
-    # Track pending signals for confirmation strategies
-    pending_signals: Dict[str, dict] = {}
+    ltf_highs = ltf_candles['high'].values
+    ltf_lows = ltf_candles['low'].values
+    ltf_closes = ltf_candles['close'].values
+    ltf_opens = ltf_candles['open'].values
+    ltf_volumes = ltf_candles['volume'].values
+    ltf_deltas = ltf_candles['delta'].values if 'delta' in ltf_candles.columns else np.zeros(len(ltf_candles))
 
-    current_channel = None
-    last_1h_time = None
+    setups = []
+    traded_entries = set()
 
-    processed_15m = 0
-    signals_found = 0
+    tf_mins = {'5m': 5, '15m': 15, '30m': 30, '1h': 60, '4h': 240}
+    tf_ratio = tf_mins[htf_tf] // tf_mins[ltf_tf]
 
-    print("\nRunning backtest...")
+    iterator = range(len(ltf_candles))
+    if not quiet:
+        iterator = tqdm(iterator, desc=f"Baseline: {htf_tf}→{ltf_tf}")
 
-    for idx_15m, candle_15m in df_15m.iterrows():
-        processed_15m += 1
-        if processed_15m % 10000 == 0:
-            print(f"  Processed {processed_15m:,} / {len(df_15m):,} 15m candles...")
+    for i in iterator:
+        current_close = ltf_closes[i]
+        current_high = ltf_highs[i]
+        current_low = ltf_lows[i]
 
-        candle_time = candle_15m['time']
+        htf_idx = i // tf_ratio
+        channel = htf_channel_map.get(htf_idx - 1)
 
-        # Update channel on new 1h candle
-        current_1h_time = candle_time.floor('h')
-        current_ema50 = None
-        if current_1h_time != last_1h_time:
-            idx_1h = df_1h[df_1h['time'] <= current_1h_time].index
-            if len(idx_1h) > 0:
-                current_channel = detect_channel(df_1h, idx_1h[-1] + 1)
-                current_ema50 = df_1h['ema50'].iloc[idx_1h[-1]]
-            last_1h_time = current_1h_time
-
-        # Get current EMA if not set this iteration
-        if current_ema50 is None:
-            idx_1h = df_1h[df_1h['time'] <= current_1h_time].index
-            if len(idx_1h) > 0:
-                current_ema50 = df_1h['ema50'].iloc[idx_1h[-1]]
-
-        # Update active trades for all strategies (using 15m data)
-        for strat_name, strat in strategies.items():
-            if strat.active_trade:
-                closed = update_trade(strat.active_trade, candle_15m)
-                if closed:
-                    pnl = calculate_pnl(strat.active_trade, strat.capital)
-                    strat.capital += pnl
-                    strat.total_pnl += pnl
-                    if strat.active_trade.tp1_hit or pnl > 0:
-                        strat.wins += 1
-                    else:
-                        strat.losses += 1
-                        # Apply cooldown after loss
-                        strat.cooldown_until = idx_15m + COOLDOWN_CANDLES
-                    strat.trades.append(strat.active_trade)
-                    strat.active_trade = None
-
-        # Check for zone entry
-        if current_channel is None:
+        if not channel:
             continue
 
-        direction = check_zone_entry(candle_15m, current_channel)
+        hist_start = max(0, i - 20)
+        hist = ltf_candles.iloc[hist_start:i]
+        avg_volume = hist['volume'].mean() if len(hist) > 0 else ltf_volumes[i]
+        avg_delta = hist['delta'].mean() if len(hist) > 0 and 'delta' in hist.columns else 0
+        cvd_recent = hist['delta'].sum() if len(hist) > 0 and 'delta' in hist.columns else 0
+
+        mid_price = (channel.resistance + channel.support) / 2
+
+        trade_key = (round(channel.support), round(channel.resistance), 'bounce', i // 20)
+        if trade_key in traded_entries:
+            continue
+
+        # BOUNCE: Support touch
+        if current_low <= channel.support * (1 + touch_threshold) and current_close > channel.support:
+            entry_price = current_close
+            sl_price = channel.support * (1 - sl_buffer_pct)
+            tp1_price = mid_price
+            tp2_price = channel.resistance * 0.998
+
+            risk = entry_price - sl_price
+            reward1 = tp1_price - entry_price
+
+            if risk > 0 and reward1 > 0:
+                setup = simulate_trade(
+                    ltf_candles, i, 'LONG', entry_price, sl_price, tp1_price, tp2_price,
+                    channel, ltf_volumes, ltf_deltas, avg_volume, avg_delta, cvd_recent, ltf_opens, ltf_closes
+                )
+                if setup:
+                    setups.append(setup)
+                    traded_entries.add(trade_key)
+
+        # BOUNCE: Resistance touch
+        elif current_high >= channel.resistance * (1 - touch_threshold) and current_close < channel.resistance:
+            entry_price = current_close
+            sl_price = channel.resistance * (1 + sl_buffer_pct)
+            tp1_price = mid_price
+            tp2_price = channel.support * 1.002
+
+            risk = sl_price - entry_price
+            reward1 = entry_price - tp1_price
+
+            if risk > 0 and reward1 > 0:
+                setup = simulate_trade(
+                    ltf_candles, i, 'SHORT', entry_price, sl_price, tp1_price, tp2_price,
+                    channel, ltf_volumes, ltf_deltas, avg_volume, avg_delta, cvd_recent, ltf_opens, ltf_closes
+                )
+                if setup:
+                    setups.append(setup)
+                    traded_entries.add(trade_key)
+
+    return setups
+
+
+def load_ml_model():
+    """Load trained ML reversal model."""
+    model_path = os.path.join(MODELS_DIR, 'reversal_model.joblib')
+    scaler_path = os.path.join(MODELS_DIR, 'reversal_scaler.joblib')
+    meta_path = os.path.join(MODELS_DIR, 'reversal_meta.joblib')
+
+    if not os.path.exists(model_path):
+        print(f"[ML] Model not found at {model_path}")
+        return None, None, None, ML_ENTRY_THRESHOLD
+
+    try:
+        model = joblib.load(model_path)
+        scaler = joblib.load(scaler_path)
+        meta = joblib.load(meta_path) if os.path.exists(meta_path) else {}
+        threshold = meta.get('best_threshold', ML_ENTRY_THRESHOLD)
+        feature_names = meta.get('feature_names', [])
+        print(f"[ML] Model loaded: threshold={threshold:.2f}, features={len(feature_names)}")
+        return model, scaler, feature_names, threshold
+    except Exception as e:
+        print(f"[ML] Failed to load model: {e}")
+        return None, None, None, ML_ENTRY_THRESHOLD
+
+
+def collect_setups_ml(htf_candles: pd.DataFrame,
+                      ltf_candles: pd.DataFrame,
+                      candles_1m: pd.DataFrame,
+                      ml_model, ml_scaler, feature_names: List[str],
+                      ml_threshold: float = ML_ENTRY_THRESHOLD,
+                      htf_tf: str = "1h",
+                      ltf_tf: str = "15m",
+                      touch_threshold: float = 0.003,
+                      sl_buffer_pct: float = 0.0008,
+                      use_dynamic_sl: bool = False,
+                      quiet: bool = False,
+                      tiebreaker: str = 'narrow') -> List[dict]:
+    """
+    Collect setups with ML-based 1m volume/delta pattern filtering.
+    """
+    if not HAS_ML_FEATURES or ml_model is None:
+        print("[ML] ML features not available, using baseline")
+        return collect_setups_baseline(htf_candles, ltf_candles, htf_tf, ltf_tf,
+                                       touch_threshold, sl_buffer_pct, quiet, tiebreaker)
+
+    htf_channel_map = build_htf_channels(htf_candles, tiebreaker=tiebreaker)
+
+    ltf_highs = ltf_candles['high'].values
+    ltf_lows = ltf_candles['low'].values
+    ltf_closes = ltf_candles['close'].values
+    ltf_opens = ltf_candles['open'].values
+    ltf_volumes = ltf_candles['volume'].values
+    ltf_deltas = ltf_candles['delta'].values if 'delta' in ltf_candles.columns else np.zeros(len(ltf_candles))
+
+    # Index 1m candles by time
+    candles_1m_indexed = candles_1m.set_index('time') if 'time' in candles_1m.columns else candles_1m
+
+    setups = []
+    traded_entries = set()
+    ml_filtered = 0
+    ml_passed = 0
+
+    tf_mins = {'5m': 5, '15m': 15, '30m': 30, '1h': 60, '4h': 240}
+    tf_ratio = tf_mins[htf_tf] // tf_mins[ltf_tf]
+    ltf_minutes = tf_mins[ltf_tf]
+
+    iterator = range(len(ltf_candles))
+    if not quiet:
+        iterator = tqdm(iterator, desc=f"ML Filter: {htf_tf}→{ltf_tf}")
+
+    for i in iterator:
+        current_close = ltf_closes[i]
+        current_high = ltf_highs[i]
+        current_low = ltf_lows[i]
+
+        htf_idx = i // tf_ratio
+        channel = htf_channel_map.get(htf_idx - 1)
+
+        if not channel:
+            continue
+
+        hist_start = max(0, i - 20)
+        hist = ltf_candles.iloc[hist_start:i]
+        avg_volume = hist['volume'].mean() if len(hist) > 0 else ltf_volumes[i]
+        avg_delta = hist['delta'].mean() if len(hist) > 0 and 'delta' in hist.columns else 0
+        cvd_recent = hist['delta'].sum() if len(hist) > 0 and 'delta' in hist.columns else 0
+
+        mid_price = (channel.resistance + channel.support) / 2
+
+        trade_key = (round(channel.support), round(channel.resistance), 'bounce', i // 20)
+        if trade_key in traded_entries:
+            continue
+
+        direction = None
+        entry_price = None
+        sl_price = None
+        tp1_price = None
+        tp2_price = None
+
+        # BOUNCE: Support touch
+        if current_low <= channel.support * (1 + touch_threshold) and current_close > channel.support:
+            direction = 'LONG'
+            entry_price = current_close
+            sl_price = channel.support * (1 - sl_buffer_pct)
+            tp1_price = mid_price
+            tp2_price = channel.resistance * 0.998
+
+        # BOUNCE: Resistance touch
+        elif current_high >= channel.resistance * (1 - touch_threshold) and current_close < channel.resistance:
+            direction = 'SHORT'
+            entry_price = current_close
+            sl_price = channel.resistance * (1 + sl_buffer_pct)
+            tp1_price = mid_price
+            tp2_price = channel.support * 1.002
+
         if direction is None:
             continue
 
-        signals_found += 1
-
-        # Strategy 1: NO_CONFIRM - Enter immediately at 15m close
-        strat = strategies['NO_CONFIRM']
-        if strat.active_trade is None and idx_15m >= strat.cooldown_until:
-            trade = create_trade(candle_time, direction, candle_15m['close'], current_channel)
-            strat.active_trade = trade
-
-        # Strategies 2 & 3: Wait for 1m confirmation
-        # Get 1m candles for the next 15 minutes
-        end_time = candle_time + timedelta(minutes=15)
-        mask = (df_1m_indexed.index > candle_time) & (df_1m_indexed.index <= end_time)
-        df_1m_window = df_1m_indexed.loc[mask]
-
-        if len(df_1m_window) == 0:
-            continue
-
-        # Check DELTA_CONFIRM
-        strat = strategies['DELTA_CONFIRM']
-        if strat.active_trade is None and idx_15m >= strat.cooldown_until:
-            for i in range(len(df_1m_window)):
-                df_1m_slice = df_1m_window.iloc[:i+1]
-                if check_delta_confirmation(df_1m_slice.reset_index(), direction):
-                    entry_candle = df_1m_window.iloc[i]
-                    trade = create_trade(
-                        entry_candle.name,  # time is the index
-                        direction,
-                        entry_candle['close'],
-                        current_channel
-                    )
-                    strat.active_trade = trade
-                    break
-
-        # Check DELTA_STRONG (higher threshold)
-        strat = strategies['DELTA_STRONG']
-        if strat.active_trade is None and idx_15m >= strat.cooldown_until:
-            for i in range(len(df_1m_window)):
-                df_1m_slice = df_1m_window.iloc[:i+1]
-                if check_delta_confirmation(df_1m_slice.reset_index(), direction, threshold=DELTA_STRONG_THRESHOLD):
-                    entry_candle = df_1m_window.iloc[i]
-                    trade = create_trade(
-                        entry_candle.name,
-                        direction,
-                        entry_candle['close'],
-                        current_channel
-                    )
-                    strat.active_trade = trade
-                    break
-
-        # Check WICK_CONFIRM
-        strat = strategies['WICK_CONFIRM']
-        if strat.active_trade is None and idx_15m >= strat.cooldown_until:
-            for i in range(len(df_1m_window)):
-                entry_candle = df_1m_window.iloc[i]
-                if check_wick_confirmation(entry_candle, direction):
-                    trade = create_trade(
-                        entry_candle.name,
-                        direction,
-                        entry_candle['close'],
-                        current_channel
-                    )
-                    strat.active_trade = trade
-                    break
-
-        # Check COMBINED (Delta + Wick both required)
-        strat = strategies['COMBINED']
-        if strat.active_trade is None and idx_15m >= strat.cooldown_until:
-            for i in range(len(df_1m_window)):
-                entry_candle = df_1m_window.iloc[i]
-                df_1m_slice = df_1m_window.iloc[:i+1]
-                delta_ok = check_delta_confirmation(df_1m_slice.reset_index(), direction)
-                wick_ok = check_wick_confirmation(entry_candle, direction)
-                if delta_ok and wick_ok:
-                    trade = create_trade(
-                        entry_candle.name,
-                        direction,
-                        entry_candle['close'],
-                        current_channel
-                    )
-                    strat.active_trade = trade
-                    break
-
-        # Check TREND_ALIGNED (Only trade when trend aligns with direction)
-        # LONG only when price above EMA50, SHORT only when below
-        strat = strategies['TREND_ALIGNED']
-        if strat.active_trade is None and idx_15m >= strat.cooldown_until and current_ema50 is not None:
-            trend_aligned = False
-            if direction == 'LONG' and candle_15m['close'] > current_ema50:
-                trend_aligned = True
-            elif direction == 'SHORT' and candle_15m['close'] < current_ema50:
-                trend_aligned = True
-
-            if trend_aligned:
-                for i in range(len(df_1m_window)):
-                    df_1m_slice = df_1m_window.iloc[:i+1]
-                    if check_delta_confirmation(df_1m_slice.reset_index(), direction):
-                        entry_candle = df_1m_window.iloc[i]
-                        trade = create_trade(
-                            entry_candle.name,
-                            direction,
-                            entry_candle['close'],
-                            current_channel
-                        )
-                        strat.active_trade = trade
-                        break
-
-        # LONG_ONLY strategy
-        strat = strategies['LONG_ONLY']
-        if strat.active_trade is None and idx_15m >= strat.cooldown_until and direction == 'LONG':
-            for i in range(len(df_1m_window)):
-                df_1m_slice = df_1m_window.iloc[:i+1]
-                if check_delta_confirmation(df_1m_slice.reset_index(), direction):
-                    entry_candle = df_1m_window.iloc[i]
-                    trade = create_trade(
-                        entry_candle.name,
-                        direction,
-                        entry_candle['close'],
-                        current_channel
-                    )
-                    strat.active_trade = trade
-                    break
-
-        # SHORT_ONLY strategy
-        strat = strategies['SHORT_ONLY']
-        if strat.active_trade is None and idx_15m >= strat.cooldown_until and direction == 'SHORT':
-            for i in range(len(df_1m_window)):
-                df_1m_slice = df_1m_window.iloc[:i+1]
-                if check_delta_confirmation(df_1m_slice.reset_index(), direction):
-                    entry_candle = df_1m_window.iloc[i]
-                    trade = create_trade(
-                        entry_candle.name,
-                        direction,
-                        entry_candle['close'],
-                        current_channel
-                    )
-                    strat.active_trade = trade
-                    break
-
-        # BEST_SETUP: Trend aligned + Delta confirmed + Good R:R
-        strat = strategies['BEST_SETUP']
-        if strat.active_trade is None and idx_15m >= strat.cooldown_until and current_ema50 is not None:
-            trend_aligned = False
-            if direction == 'LONG' and candle_15m['close'] > current_ema50:
-                trend_aligned = True
-            elif direction == 'SHORT' and candle_15m['close'] < current_ema50:
-                trend_aligned = True
-
-            if trend_aligned:
-                for i in range(len(df_1m_window)):
-                    df_1m_slice = df_1m_window.iloc[:i+1]
-                    if check_delta_confirmation(df_1m_slice.reset_index(), direction):
-                        entry_candle = df_1m_window.iloc[i]
-                        rr = check_rr_ratio(entry_candle['close'], direction, current_channel)
-                        if rr >= MIN_RR_RATIO:
-                            trade = create_trade(
-                                entry_candle.name,
-                                direction,
-                                entry_candle['close'],
-                                current_channel
-                            )
-                            strat.active_trade = trade
-                        break  # Only check first delta confirmation
-
-        # TIGHT_CHANNEL: Only trade narrow channels (better R:R)
-        channel_width = (current_channel.resistance - current_channel.support) / current_channel.support
-        strat = strategies['TIGHT_CHANNEL']
-        if strat.active_trade is None and idx_15m >= strat.cooldown_until and channel_width < 0.025:
-            for i in range(len(df_1m_window)):
-                df_1m_slice = df_1m_window.iloc[:i+1]
-                if check_delta_confirmation(df_1m_slice.reset_index(), direction):
-                    entry_candle = df_1m_window.iloc[i]
-                    trade = create_trade(
-                        entry_candle.name,
-                        direction,
-                        entry_candle['close'],
-                        current_channel
-                    )
-                    strat.active_trade = trade
-                    break
-
-        # FIXED_RR: Fixed 1.5:1 R:R with delta confirmation (no partial exit)
-        strat = strategies['FIXED_RR']
-        if strat.active_trade is None and idx_15m >= strat.cooldown_until:
-            for i in range(len(df_1m_window)):
-                df_1m_slice = df_1m_window.iloc[:i+1]
-                if check_delta_confirmation(df_1m_slice.reset_index(), direction):
-                    entry_candle = df_1m_window.iloc[i]
-                    trade = create_trade(
-                        entry_candle.name,
-                        direction,
-                        entry_candle['close'],
-                        current_channel,
-                        tp_style='fixed_1.5'
-                    )
-                    strat.active_trade = trade
-                    break
-
-        # TREND_FIXED_RR: Trend aligned + Fixed 2:1 R:R
-        strat = strategies['TREND_FIXED_RR']
-        if strat.active_trade is None and idx_15m >= strat.cooldown_until and current_ema50 is not None:
-            trend_aligned = False
-            if direction == 'LONG' and candle_15m['close'] > current_ema50:
-                trend_aligned = True
-            elif direction == 'SHORT' and candle_15m['close'] < current_ema50:
-                trend_aligned = True
-
-            if trend_aligned:
-                for i in range(len(df_1m_window)):
-                    df_1m_slice = df_1m_window.iloc[:i+1]
-                    if check_delta_confirmation(df_1m_slice.reset_index(), direction):
-                        entry_candle = df_1m_window.iloc[i]
-                        trade = create_trade(
-                            entry_candle.name,
-                            direction,
-                            entry_candle['close'],
-                            current_channel,
-                            tp_style='fixed_2.0'
-                        )
-                        strat.active_trade = trade
-                        break
-
-        # TREND_1.5RR: Trend aligned + Fixed 1.5:1 R:R
-        strat = strategies['TREND_1.5RR']
-        if strat.active_trade is None and idx_15m >= strat.cooldown_until and current_ema50 is not None:
-            trend_aligned = False
-            if direction == 'LONG' and candle_15m['close'] > current_ema50:
-                trend_aligned = True
-            elif direction == 'SHORT' and candle_15m['close'] < current_ema50:
-                trend_aligned = True
-
-            if trend_aligned:
-                for i in range(len(df_1m_window)):
-                    df_1m_slice = df_1m_window.iloc[:i+1]
-                    if check_delta_confirmation(df_1m_slice.reset_index(), direction):
-                        entry_candle = df_1m_window.iloc[i]
-                        trade = create_trade(
-                            entry_candle.name,
-                            direction,
-                            entry_candle['close'],
-                            current_channel,
-                            tp_style='fixed_1.5'
-                        )
-                        strat.active_trade = trade
-                        break
-
-        # TREND_LONG_ONLY: Trend aligned, Long only, Fixed 1.5:1 R:R
-        strat = strategies['TREND_LONG_ONLY']
-        if strat.active_trade is None and idx_15m >= strat.cooldown_until and current_ema50 is not None:
-            if direction == 'LONG' and candle_15m['close'] > current_ema50:
-                for i in range(len(df_1m_window)):
-                    df_1m_slice = df_1m_window.iloc[:i+1]
-                    if check_delta_confirmation(df_1m_slice.reset_index(), direction):
-                        entry_candle = df_1m_window.iloc[i]
-                        trade = create_trade(
-                            entry_candle.name,
-                            direction,
-                            entry_candle['close'],
-                            current_channel,
-                            tp_style='fixed_1.5'
-                        )
-                        strat.active_trade = trade
-                        break
-
-        # TREND_LONG_2RR: Trend aligned, Long only, Fixed 2:1 R:R
-        strat = strategies['TREND_LONG_2RR']
-        if strat.active_trade is None and idx_15m >= strat.cooldown_until and current_ema50 is not None:
-            if direction == 'LONG' and candle_15m['close'] > current_ema50:
-                for i in range(len(df_1m_window)):
-                    df_1m_slice = df_1m_window.iloc[:i+1]
-                    if check_delta_confirmation(df_1m_slice.reset_index(), direction):
-                        entry_candle = df_1m_window.iloc[i]
-                        trade = create_trade(
-                            entry_candle.name,
-                            direction,
-                            entry_candle['close'],
-                            current_channel,
-                            tp_style='fixed_2.0'
-                        )
-                        strat.active_trade = trade
-                        break
-
-        # TREND_LONG_STRONG: Trend Long + Strong Delta (threshold=150)
-        strat = strategies['TREND_LONG_STRONG']
-        if strat.active_trade is None and idx_15m >= strat.cooldown_until and current_ema50 is not None:
-            if direction == 'LONG' and candle_15m['close'] > current_ema50:
-                for i in range(len(df_1m_window)):
-                    df_1m_slice = df_1m_window.iloc[:i+1]
-                    if check_delta_confirmation(df_1m_slice.reset_index(), direction, threshold=DELTA_STRONG_THRESHOLD):
-                        entry_candle = df_1m_window.iloc[i]
-                        trade = create_trade(
-                            entry_candle.name,
-                            direction,
-                            entry_candle['close'],
-                            current_channel,
-                            tp_style='fixed_1.5'
-                        )
-                        strat.active_trade = trade
-                        break
-
-    # Close any remaining trades at last price
-    last_price = df_15m['close'].iloc[-1]
-    for strat_name, strat in strategies.items():
-        if strat.active_trade:
-            strat.active_trade.exit_price = last_price
-            strat.active_trade.status = 'OPEN'
-            strat.trades.append(strat.active_trade)
-
-    print(f"\nTotal signals found: {signals_found}")
-
-    return strategies
-
-
-def print_results(strategies: Dict[str, Strategy]):
-    """Print backtest results."""
-    print("\n" + "="*80)
-    print("BACKTEST RESULTS")
-    print("="*80)
-
-    print(f"\n{'Strategy':<35} {'Capital':>12} {'Return':>10} {'Trades':>8} {'Wins':>6} {'WR':>8} {'Avg PnL':>10}")
-    print("-"*80)
-
-    for name, strat in strategies.items():
-        total_trades = len(strat.trades)
-        win_rate = strat.wins / (strat.wins + strat.losses) * 100 if (strat.wins + strat.losses) > 0 else 0
-        returns = (strat.capital / INITIAL_CAPITAL - 1) * 100
-        avg_pnl = strat.total_pnl / total_trades if total_trades > 0 else 0
-
-        print(f"{strat.name:<35} ${strat.capital:>10,.2f} {returns:>+9.1f}% {total_trades:>8} {strat.wins:>6} {win_rate:>7.1f}% ${avg_pnl:>9.2f}")
-
-    print("="*80)
-
-    # Detailed stats
-    for name, strat in strategies.items():
-        print(f"\n{strat.name}:")
-
-        if len(strat.trades) == 0:
-            print("  No trades")
-            continue
-
-        # Count by exit type
-        sl_hits = sum(1 for t in strat.trades if t.status == 'SL_HIT')
-        tp1_only = sum(1 for t in strat.trades if t.status == 'BE_HIT')
-        tp2_hits = sum(1 for t in strat.trades if t.status == 'TP2_HIT')
-        tp_hits = sum(1 for t in strat.trades if t.status == 'TP_HIT')  # Fixed R:R
-
-        print(f"  SL Hits: {sl_hits} ({sl_hits/len(strat.trades)*100:.1f}%)")
-        if tp_hits > 0:
-            print(f"  TP Hits: {tp_hits} ({tp_hits/len(strat.trades)*100:.1f}%)")
+        # Validate risk/reward
+        if direction == 'LONG':
+            risk = entry_price - sl_price
+            reward1 = tp1_price - entry_price
         else:
-            print(f"  TP1→BE: {tp1_only} ({tp1_only/len(strat.trades)*100:.1f}%)")
-            print(f"  TP2 Hits: {tp2_hits} ({tp2_hits/len(strat.trades)*100:.1f}%)")
+            risk = sl_price - entry_price
+            reward1 = entry_price - tp1_price
 
-        # Long vs Short
-        longs = [t for t in strat.trades if t.direction == 'LONG']
-        shorts = [t for t in strat.trades if t.direction == 'SHORT']
-        print(f"  Longs: {len(longs)}, Shorts: {len(shorts)}")
+        if risk <= 0 or reward1 <= 0:
+            continue
+
+        # Get 1m window for ML features
+        candle_time = ltf_candles.index[i]
+        try:
+            end_time = candle_time + pd.Timedelta(minutes=ltf_minutes)
+            start_time = end_time - pd.Timedelta(minutes=20)
+            mask = (candles_1m_indexed.index > start_time) & (candles_1m_indexed.index <= end_time)
+            df_1m_window = candles_1m_indexed.loc[mask].reset_index()
+        except Exception:
+            df_1m_window = pd.DataFrame()
+
+        if len(df_1m_window) < 5:
+            # Not enough 1m data, skip this trade
+            ml_filtered += 1
+            continue
+
+        # Extract 1m features
+        features_1m = extract_1m_features(
+            df_1m_window,
+            direction,
+            channel.support,
+            channel.resistance
+        )
+
+        # Build feature vector
+        feature_values = []
+        for fname in feature_names:
+            if fname.startswith('1m_'):
+                key = fname[3:]
+                feature_values.append(features_1m.get(key, 0.0))
+            elif fname == 'channel_width':
+                feature_values.append((channel.resistance - channel.support) / channel.support)
+            elif fname == 'support_touches':
+                feature_values.append(channel.support_touches)
+            elif fname == 'resistance_touches':
+                feature_values.append(channel.resistance_touches)
+            elif fname == 'is_long':
+                feature_values.append(1 if direction == 'LONG' else 0)
+            else:
+                feature_values.append(0.0)
+
+        # Predict
+        X = np.array([feature_values])
+        X = np.nan_to_num(X, nan=0.0, posinf=1e10, neginf=-1e10)
+        X_scaled = ml_scaler.transform(X)
+        prob = ml_model.predict_proba(X_scaled)[0, 1]
+
+        # Filter by threshold
+        if prob < ml_threshold:
+            ml_filtered += 1
+            continue
+
+        ml_passed += 1
+
+        # Dynamic SL (optional)
+        if use_dynamic_sl and len(df_1m_window) > 0:
+            sl_price = calculate_dynamic_sl(
+                df_1m_window,
+                direction,
+                channel.support,
+                channel.resistance,
+                0.0003
+            )
+
+        # Simulate trade
+        setup = simulate_trade(
+            ltf_candles, i, direction, entry_price, sl_price, tp1_price, tp2_price,
+            channel, ltf_volumes, ltf_deltas, avg_volume, avg_delta, cvd_recent, ltf_opens, ltf_closes
+        )
+        if setup:
+            setup['ml_prob'] = prob
+            setups.append(setup)
+            traded_entries.add(trade_key)
+
+    print(f"  [ML] Passed: {ml_passed}, Filtered: {ml_filtered} (threshold={ml_threshold:.2f})")
+
+    return setups
 
 
-def main():
-    # Load data
-    df_1h, df_15m, df_1m = load_data()
+def run_backtest(setups: List[dict], label: str = "") -> dict:
+    """Run backtest on setups and return results."""
+    if not setups:
+        print(f"  {label}: No trades")
+        return {'trades': 0, 'wr': 0, 'return_pct': 0, 'max_dd': 0, 'final_capital': 10000}
 
-    # Run backtest
-    strategies = run_backtest(
-        df_1h, df_15m, df_1m,
-        start_date='2023-01-01',
-        end_date='2025-01-01'
-    )
+    df = pd.DataFrame(setups)
 
-    # Print results
-    print_results(strategies)
+    capital = 10000
+    risk_pct = 0.015
+    max_leverage = 15
+    fee_pct = 0.0004
 
-    # Summary of best strategies
-    print("\n" + "="*80)
-    print("RECOMMENDATIONS")
-    print("="*80)
-    print("""
-Best performing strategies (in order):
+    peak = capital
+    max_dd = 0
+    wins = 0
+    losses = 0
 
-1. TREND LONG ONLY with 1.5:1 R:R
-   - Only take LONG trades when price > EMA50
-   - Wait for delta confirmation (positive delta in 1m timeframe)
-   - Use fixed 1.5:1 risk:reward (no partial exits)
-   - 53-54% TP hit rate, 46% SL hit rate
+    for _, trade in df.iterrows():
+        sl_dist = abs(trade['entry'] - trade['sl']) / trade['entry']
+        if sl_dist <= 0:
+            continue
 
-2. Key Filters:
-   - TREND: Price must be above 50 EMA on 1h timeframe for longs
-   - DELTA: Must see positive delta flow in 1m candles before entry
-   - NO SHORTS: Short trades have ~70% SL hit rate, avoid them
+        leverage = min(risk_pct / sl_dist, max_leverage)
+        position_value = capital * leverage
 
-3. Entry Process:
-   a) 1h: Detect channel + check trend (price > EMA50)
-   b) 15m: Wait for candle to touch support zone and close above it
-   c) 1m: Wait for delta confirmation (cumulative delta > threshold)
-   d) Enter at 1m candle close with 1.5:1 R:R target
+        gross_pnl = position_value * trade['pnl_pct']
+        fees = position_value * fee_pct * 2
+        net_pnl = gross_pnl - fees
 
-4. Exit Strategy:
-   - SL at channel support (with small buffer)
-   - TP at 1.5x risk distance (NOT at channel midpoint)
-   - No partial exits, full position exit at TP or SL
-""")
+        capital += net_pnl
+        capital = max(capital, 0)
+
+        if net_pnl > 0:
+            wins += 1
+        else:
+            losses += 1
+
+        if capital > peak:
+            peak = capital
+        dd = (peak - capital) / peak if peak > 0 else 0
+        max_dd = max(max_dd, dd)
+
+        if capital <= 0:
+            break
+
+    total_return = (capital - 10000) / 10000 * 100
+    wr = wins / (wins + losses) * 100 if (wins + losses) > 0 else 0
+
+    return {
+        'trades': len(df),
+        'wr': wr,
+        'return_pct': total_return,
+        'max_dd': max_dd * 100,
+        'final_capital': capital
+    }
 
 
-if __name__ == "__main__":
-    main()
+def run_baseline_backtest(year: int = 2024):
+    """Run baseline backtest (same as ml_channel_tiebreaker_proper.py NARROW)."""
+    print(f"\n{'='*70}")
+    print(f"  BASELINE BACKTEST (ml_channel_tiebreaker_proper.py NARROW)")
+    print(f"{'='*70}")
+
+    htf = "1h"
+    ltf = "15m"
+
+    print(f"\nLoading {htf} data...")
+    htf_candles_pl = load_candles("BTCUSDT", htf)
+    htf_candles = htf_candles_pl.to_pandas().set_index('time')
+    htf_candles = htf_candles[htf_candles.index.year == year]
+    print(f"  Loaded {len(htf_candles):,} candles ({year} only)")
+
+    print(f"\nLoading {ltf} data...")
+    ltf_candles_pl = load_candles("BTCUSDT", ltf)
+    ltf_candles = ltf_candles_pl.to_pandas().set_index('time')
+    ltf_candles = ltf_candles[ltf_candles.index.year == year]
+    print(f"  Loaded {len(ltf_candles):,} candles")
+
+    print(f"\nCollecting setups...")
+    setups = collect_setups_baseline(htf_candles, ltf_candles, htf, ltf, tiebreaker='narrow')
+
+    result = run_backtest(setups, "BASELINE")
+
+    print(f"\n  Results:")
+    print(f"    Trades: {result['trades']}")
+    print(f"    Win Rate: {result['wr']:.1f}%")
+    print(f"    Return: {result['return_pct']:+.1f}%")
+    print(f"    Max DD: {result['max_dd']:.1f}%")
+    print(f"    Final Capital: ${result['final_capital']:,.2f}")
+
+    return result
+
+
+def run_ml_backtest(year: int = 2024, thresholds: List[float] = None):
+    """Run ML backtest comparing baseline vs ML filtered."""
+    print(f"\n{'='*70}")
+    print(f"  ML BACKTEST COMPARISON")
+    print(f"{'='*70}")
+
+    htf = "1h"
+    ltf = "15m"
+
+    if thresholds is None:
+        thresholds = [0.4, 0.5, 0.6, 0.7]
+
+    print(f"\nLoading data...")
+    htf_candles_pl = load_candles("BTCUSDT", htf)
+    htf_candles = htf_candles_pl.to_pandas().set_index('time')
+    htf_candles = htf_candles[htf_candles.index.year == year]
+
+    ltf_candles_pl = load_candles("BTCUSDT", ltf)
+    ltf_candles = ltf_candles_pl.to_pandas().set_index('time')
+    ltf_candles = ltf_candles[ltf_candles.index.year == year]
+
+    candles_1m_pl = load_candles("BTCUSDT", "1m")
+    candles_1m = candles_1m_pl.to_pandas()
+    candles_1m['time'] = pd.to_datetime(candles_1m['time'])
+    candles_1m = candles_1m[candles_1m['time'].dt.year == year]
+
+    print(f"  1h: {len(htf_candles):,} candles")
+    print(f"  15m: {len(ltf_candles):,} candles")
+    print(f"  1m: {len(candles_1m):,} candles")
+
+    # Load ML model
+    ml_model, ml_scaler, feature_names, default_threshold = load_ml_model()
+
+    results = {}
+
+    # Baseline
+    print(f"\n[BASELINE]")
+    setups_baseline = collect_setups_baseline(htf_candles, ltf_candles, htf, ltf, quiet=True, tiebreaker='narrow')
+    results['BASELINE'] = run_backtest(setups_baseline, "BASELINE")
+    print(f"  Trades: {results['BASELINE']['trades']}, WR: {results['BASELINE']['wr']:.1f}%, Return: {results['BASELINE']['return_pct']:+.1f}%")
+
+    # ML filtered
+    if ml_model is not None:
+        for thresh in thresholds:
+            name = f'ML_T{int(thresh*100)}'
+            print(f"\n[{name}]")
+            setups_ml = collect_setups_ml(
+                htf_candles, ltf_candles, candles_1m,
+                ml_model, ml_scaler, feature_names,
+                ml_threshold=thresh,
+                htf_tf=htf, ltf_tf=ltf,
+                quiet=True, tiebreaker='narrow'
+            )
+            results[name] = run_backtest(setups_ml, name)
+            print(f"  Trades: {results[name]['trades']}, WR: {results[name]['wr']:.1f}%, Return: {results[name]['return_pct']:+.1f}%")
+
+        # With dynamic SL
+        print(f"\n[ML_T50_DYN_SL]")
+        setups_ml_dyn = collect_setups_ml(
+            htf_candles, ltf_candles, candles_1m,
+            ml_model, ml_scaler, feature_names,
+            ml_threshold=0.5,
+            htf_tf=htf, ltf_tf=ltf,
+            use_dynamic_sl=True,
+            quiet=True, tiebreaker='narrow'
+        )
+        results['ML_T50_DYN_SL'] = run_backtest(setups_ml_dyn, "ML_T50_DYN_SL")
+        print(f"  Trades: {results['ML_T50_DYN_SL']['trades']}, WR: {results['ML_T50_DYN_SL']['wr']:.1f}%, Return: {results['ML_T50_DYN_SL']['return_pct']:+.1f}%")
+
+    # Summary
+    print(f"\n{'='*80}")
+    print(f"  RESULTS SUMMARY")
+    print(f"{'='*80}")
+    print(f"\n{'Strategy':<20} {'Trades':>8} {'WR':>8} {'Return':>12} {'Max DD':>8} {'Final':>15}")
+    print("-" * 80)
+
+    for name, res in sorted(results.items(), key=lambda x: x[1]['return_pct'], reverse=True):
+        print(f"{name:<20} {res['trades']:>8} {res['wr']:>7.1f}% {res['return_pct']:>+11.1f}% {res['max_dd']:>7.1f}% ${res['final_capital']:>14,.2f}")
+
+    # Comparison
+    baseline = results.get('BASELINE', {})
+    best_ml = max([(k, v) for k, v in results.items() if k.startswith('ML_')],
+                  key=lambda x: x[1].get('return_pct', -999), default=(None, None))
+
+    if best_ml[0] and baseline:
+        print(f"\n{'='*80}")
+        print(f"  COMPARISON: BASELINE vs {best_ml[0]}")
+        print(f"{'='*80}")
+        print(f"  Baseline:  {baseline['trades']} trades, {baseline['wr']:.1f}% WR, {baseline['return_pct']:+.1f}% return")
+        print(f"  {best_ml[0]}:  {best_ml[1]['trades']} trades, {best_ml[1]['wr']:.1f}% WR, {best_ml[1]['return_pct']:+.1f}% return")
+        print(f"  WR improvement: {best_ml[1]['wr'] - baseline['wr']:+.1f}%")
+        print(f"  Return improvement: {best_ml[1]['return_pct'] - baseline['return_pct']:+.1f}%")
+
+    return results
+
+
+if __name__ == '__main__':
+    import sys
+
+    if '--ml' in sys.argv:
+        if '--oos' in sys.argv:
+            # OOS test: 2024-2025
+            print("\n" + "="*70)
+            print("  OUT-OF-SAMPLE TEST (2024)")
+            print("="*70)
+            run_ml_backtest(year=2024)
+        else:
+            # Default: 2024
+            run_ml_backtest(year=2024)
+    else:
+        run_baseline_backtest(year=2024)

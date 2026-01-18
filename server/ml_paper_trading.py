@@ -1119,9 +1119,9 @@ class MLPaperTradingService:
         for key in keys_to_remove:
             del self.active_channels[key]
 
-        # Find BEST confirmed channel
-        best_channel = None
-        best_score = -1
+        # Find BEST confirmed channel using NARROW tiebreaker (matches backtest baseline)
+        # Collect all valid candidates with scores
+        candidates = []
 
         for key, channel in self.active_channels.items():
             if not channel.confirmed:
@@ -1133,15 +1133,28 @@ class MLPaperTradingService:
 
             # Score by total touches
             score = channel.support_touches + channel.resistance_touches
-            if score > best_score:
-                best_score = score
-                best_channel = channel
+            width_pct = (channel.resistance - channel.support) / channel.support
+            candidates.append((score, width_pct, channel))
+
+        best_channel = None
+        if candidates:
+            # Find max score
+            max_score = max(c[0] for c in candidates)
+            top_candidates = [c for c in candidates if c[0] == max_score]
+
+            # Apply NARROW tiebreaker: select narrowest channel among tied scores
+            if len(top_candidates) == 1:
+                best_channel = top_candidates[0][2]
+            else:
+                # Select narrowest channel (min width)
+                best_channel = min(top_candidates, key=lambda c: c[1])[2]
 
         # Log channel status
         confirmed_count = sum(1 for c in self.active_channels.values() if c.confirmed)
-        print(f"[CHANNEL] Active: {len(self.active_channels)}, Confirmed: {confirmed_count}")
+        print(f"[CHANNEL] Active: {len(self.active_channels)}, Confirmed: {confirmed_count}, Candidates: {len(candidates)}")
         if best_channel:
-            print(f"[CHANNEL] Best: S={best_channel.support:.0f}({best_channel.support_touches}) R={best_channel.resistance:.0f}({best_channel.resistance_touches})")
+            width_pct = (best_channel.resistance - best_channel.support) / best_channel.support * 100
+            print(f"[CHANNEL] Best (NARROW): S={best_channel.support:.0f}({best_channel.support_touches}) R={best_channel.resistance:.0f}({best_channel.resistance_touches}) W={width_pct:.2f}%")
 
         self.current_channel = best_channel
         return best_channel
