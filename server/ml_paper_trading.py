@@ -303,9 +303,20 @@ class MLPaperTradingService:
             print(f"[LOAD] Error loading state: {e}, starting fresh")
 
     def _save_signal(self, signal: Signal) -> int:
-        """Save signal to database and return ID."""
+        """Save signal to database and return ID. Returns -1 if duplicate."""
         conn = sqlite3.connect(PAPER_DB_PATH)
         c = conn.cursor()
+
+        # Check for duplicate signal (same timestamp and direction)
+        c.execute('''SELECT id FROM signals
+                     WHERE timestamp = ? AND direction = ? AND entry_price = ?''',
+                  (signal.timestamp, signal.direction, signal.entry_price))
+        existing = c.fetchone()
+        if existing:
+            conn.close()
+            print(f"[SIGNAL] Duplicate detected, skipping (timestamp={signal.timestamp})")
+            return -1  # Signal duplicate marker
+
         c.execute('''INSERT INTO signals
             (timestamp, direction, setup_type, entry_price, sl_price, tp1_price, tp2_price,
              channel_support, channel_resistance, entry_prob)
@@ -571,9 +582,13 @@ class MLPaperTradingService:
 
     def _process_signal(self, signal: Signal, entry_candle_time: int = 0):
         """Process a new signal for all strategies."""
-        self.signal_counter += 1
         signal_id = self._save_signal(signal)
 
+        # Skip if duplicate signal
+        if signal_id == -1:
+            return
+
+        self.signal_counter += 1
         now_ms = int(datetime.now().timestamp() * 1000)
         now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         print(f"\n{'='*60}")
