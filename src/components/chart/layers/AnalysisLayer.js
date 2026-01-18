@@ -159,24 +159,18 @@ export class AnalysisLayer {
                 : new Date(signal.timestamp).getTime();
             let candleIdx = -1;
 
-            // Find the candle that matches the signal time
-            for (let i = 0; i < state.candles.length; i++) {
-                const candleTime = state.candles[i].time;
-                // Allow some tolerance (within same candle period)
-                if (Math.abs(candleTime - signalTime) < 15 * 60 * 1000) { // 15 min tolerance
+            // Find the candle that CONTAINS the signal time
+            // (last candle where candleTime <= signalTime)
+            for (let i = state.candles.length - 1; i >= 0; i--) {
+                if (state.candles[i].time <= signalTime) {
                     candleIdx = i;
                     break;
                 }
             }
 
-            // Fallback: find nearest candle if exact match not found
-            if (candleIdx < 0) {
-                for (let i = 0; i < state.candles.length; i++) {
-                    if (state.candles[i].time >= signalTime) {
-                        candleIdx = i;
-                        break;
-                    }
-                }
+            // Fallback: if signal is before all candles, use first candle
+            if (candleIdx < 0 && state.candles.length > 0) {
+                candleIdx = 0;
             }
 
             if (candleIdx < 0) continue;

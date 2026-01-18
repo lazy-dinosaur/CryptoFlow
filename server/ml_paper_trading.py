@@ -97,6 +97,7 @@ class Trade:
     closed_at: int = 0  # milliseconds
     db_id: int = 0
     tp1_profit_taken: bool = False  # Track if TP1 profit has been added to capital
+    entry_candle_time: int = 0  # Candle start time at entry (for lookahead bias prevention)
 
 
 @dataclass
@@ -194,8 +195,15 @@ class MLPaperTradingService:
             pnl_pct REAL,
             closed_at INTEGER,
             tp1_profit_taken INTEGER DEFAULT 0,
+            entry_candle_time INTEGER DEFAULT 0,
             FOREIGN KEY (signal_id) REFERENCES signals(id)
         )''')
+
+        # Add entry_candle_time column if it doesn't exist (for existing DBs)
+        try:
+            c.execute('ALTER TABLE trades ADD COLUMN entry_candle_time INTEGER DEFAULT 0')
+        except sqlite3.OperationalError:
+            pass  # Column already exists
 
         # Strategy states table
         c.execute('''CREATE TABLE IF NOT EXISTS strategy_states (
@@ -251,7 +259,8 @@ class MLPaperTradingService:
                     c.execute('''SELECT id, signal_id, strategy, timestamp, direction, setup_type,
                                         entry_price, sl_price, tp1_price, tp2_price,
                                         channel_support, channel_resistance,
-                                        status, exit_decision, pnl_pct, closed_at, tp1_profit_taken
+                                        status, exit_decision, pnl_pct, closed_at, tp1_profit_taken,
+                                        entry_candle_time
                                  FROM trades WHERE strategy = ? AND status IN ('ACTIVE', 'TP1_HIT')''',
                               (strategy_name,))
                     for row in c.fetchall():
@@ -272,7 +281,8 @@ class MLPaperTradingService:
                             pnl_pct=row[14] or 0.0,
                             closed_at=row[15] or 0,
                             db_id=row[0],
-                            tp1_profit_taken=bool(row[16]) if row[16] is not None else False
+                            tp1_profit_taken=bool(row[16]) if row[16] is not None else False,
+                            entry_candle_time=row[17] or 0
                         )
                         state.active_trades.append(trade)
                         print(f"[LOAD] Restored active trade: {trade.direction} {trade.setup_type} @ {trade.entry_price:.2f} ({trade.status})")
@@ -306,13 +316,13 @@ class MLPaperTradingService:
         c.execute('''INSERT INTO trades
             (signal_id, strategy, timestamp, direction, setup_type, entry_price, sl_price,
              tp1_price, tp2_price, channel_support, channel_resistance, status,
-             exit_decision, pnl_pct, closed_at, tp1_profit_taken)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+             exit_decision, pnl_pct, closed_at, tp1_profit_taken, entry_candle_time)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (trade.signal_id, trade.strategy, trade.timestamp, trade.direction,
              trade.setup_type, trade.entry_price, trade.sl_price, trade.tp1_price,
              trade.tp2_price, trade.channel_support, trade.channel_resistance, trade.status,
              trade.exit_decision, trade.pnl_pct, trade.closed_at,
-             1 if trade.tp1_profit_taken else 0))
+             1 if trade.tp1_profit_taken else 0, trade.entry_candle_time))
         trade_id = c.lastrowid
         conn.commit()
         conn.close()
@@ -550,7 +560,7 @@ class MLPaperTradingService:
         pred = self.exit_model.predict(features_scaled)[0]
         return 'EXIT' if pred == EXIT_AT_TP1 else 'HOLD'
 
-    def _process_signal(self, signal: Signal):
+    def _process_signal(self, signal: Signal, entry_candle_time: int = 0):
         """Process a new signal for all strategies."""
         self.signal_counter += 1
         signal_id = self._save_signal(signal)
@@ -577,7 +587,8 @@ class MLPaperTradingService:
             tp1_price=signal.tp1_price,
             tp2_price=signal.tp2_price,
             channel_support=signal.channel_support,
-            channel_resistance=signal.channel_resistance
+            channel_resistance=signal.channel_resistance,
+            entry_candle_time=entry_candle_time
         )
         trade_no_ml.db_id = self._save_trade(trade_no_ml)
         self.strategies['NO_ML'].active_trades.append(trade_no_ml)
@@ -598,7 +609,8 @@ class MLPaperTradingService:
                 tp1_price=signal.tp1_price,
                 tp2_price=signal.tp2_price,
                 channel_support=signal.channel_support,
-                channel_resistance=signal.channel_resistance
+                channel_resistance=signal.channel_resistance,
+                entry_candle_time=entry_candle_time
             )
             trade_ml_entry.db_id = self._save_trade(trade_ml_entry)
             self.strategies['ML_ENTRY'].active_trades.append(trade_ml_entry)
@@ -617,7 +629,8 @@ class MLPaperTradingService:
                 tp1_price=signal.tp1_price,
                 tp2_price=signal.tp2_price,
                 channel_support=signal.channel_support,
-                channel_resistance=signal.channel_resistance
+                channel_resistance=signal.channel_resistance,
+                entry_candle_time=entry_candle_time
             )
             trade_ml_combined.db_id = self._save_trade(trade_ml_combined)
             self.strategies['ML_COMBINED'].active_trades.append(trade_ml_combined)
@@ -632,6 +645,11 @@ class MLPaperTradingService:
         """Update all active trades with current price."""
         now_ms = int(datetime.now().timestamp() * 1000)
 
+        # Get current 15m candle time for lookahead bias prevention
+        current_candle_time = 0
+        if df_15m is not None and len(df_15m) > 0:
+            current_candle_time = int(df_15m['time'].iloc[-1].timestamp() * 1000)
+
         for strategy_name, state in self.strategies.items():
             trades_to_remove = []
 
@@ -639,6 +657,11 @@ class MLPaperTradingService:
                 is_long = trade.direction == 'LONG'
                 closed = False
                 pnl_pct = 0.0
+
+                # Lookahead bias prevention: skip TP/SL check if still in entry candle
+                if trade.entry_candle_time > 0 and current_candle_time <= trade.entry_candle_time:
+                    # Still in the entry candle, skip TP/SL check to prevent lookahead bias
+                    continue
 
                 if trade.status == 'ACTIVE':
                     # Check SL
@@ -944,6 +967,8 @@ class MLPaperTradingService:
         current_low = df_15m['low'].iloc[-1]
         # Always use current time for signal timestamp (more reliable than candle time)
         current_time_ms = int(datetime.now().timestamp() * 1000)
+        # Get 15m candle start time for lookahead bias prevention
+        entry_candle_time = int(df_15m['time'].iloc[-1].timestamp() * 1000)
 
         # Save current price for API
         self.last_price = current_close
@@ -985,7 +1010,7 @@ class MLPaperTradingService:
                         channel_resistance=channel.resistance,
                         entry_prob=prob
                     )
-                    self._process_signal(signal)
+                    self._process_signal(signal, entry_candle_time)
                     self.recent_signals.add(signal_key)
 
             # Resistance bounce → SHORT
@@ -1011,7 +1036,7 @@ class MLPaperTradingService:
                         channel_resistance=channel.resistance,
                         entry_prob=prob
                     )
-                    self._process_signal(signal)
+                    self._process_signal(signal, entry_candle_time)
                     self.recent_signals.add(signal_key)
 
         # Clean old signal keys

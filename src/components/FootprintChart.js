@@ -622,15 +622,23 @@ export class FootprintChart {
 
         for (const signal of this.tradeSignals) {
             // Find candle index by timestamp
-            const signalTime = new Date(signal.timestamp).getTime();
+            const signalTime = typeof signal.timestamp === 'number'
+                ? signal.timestamp
+                : new Date(signal.timestamp).getTime();
             let candleIdx = -1;
 
-            for (let i = 0; i < this.candles.length; i++) {
-                const candleTime = this.candles[i].time;
-                if (candleTime >= signalTime) {
+            // Find the candle that CONTAINS the signal time
+            // (last candle where candleTime <= signalTime)
+            for (let i = this.candles.length - 1; i >= 0; i--) {
+                if (this.candles[i].time <= signalTime) {
                     candleIdx = i;
                     break;
                 }
+            }
+
+            // Fallback: if signal is before all candles, use first candle
+            if (candleIdx < 0 && this.candles.length > 0) {
+                candleIdx = 0;
             }
 
             if (candleIdx < 0) continue;
@@ -704,15 +712,21 @@ export class FootprintChart {
             const signal = this.tradeSignals[i];
 
             // Find candle index by timestamp
-            const signalTime = new Date(signal.timestamp).getTime();
+            const signalTime = typeof signal.timestamp === 'number'
+                ? signal.timestamp
+                : new Date(signal.timestamp).getTime();
             let candleIdx = -1;
 
-            for (let j = 0; j < this.candles.length; j++) {
-                const candleTime = this.candles[j].time;
-                if (candleTime >= signalTime) {
+            // Find the candle that CONTAINS the signal time
+            for (let j = this.candles.length - 1; j >= 0; j--) {
+                if (this.candles[j].time <= signalTime) {
                     candleIdx = j;
                     break;
                 }
+            }
+
+            if (candleIdx < 0 && this.candles.length > 0) {
+                candleIdx = 0;
             }
 
             if (candleIdx < 0) continue;
