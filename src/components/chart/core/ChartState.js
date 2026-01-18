@@ -11,6 +11,7 @@ export class ChartState {
         this.nakedLiquidityLevels = [];
         this.bigTrades = [];
         this.sessionMarkers = [];
+        this.tradeSignals = [];  // Paper trading signals
         this.currentPrice = null;
 
         // View State
@@ -57,6 +58,11 @@ export class ChartState {
     setHeatmapData(data) {
         this.heatmapData = data || [];
         this.notify(); // Depending on performance we might not want to notify on every update
+    }
+
+    setTradeSignals(signals) {
+        this.tradeSignals = signals || [];
+        this.notify();
     }
 
     updateDimensions(width, height) {

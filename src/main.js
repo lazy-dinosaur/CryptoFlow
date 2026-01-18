@@ -176,6 +176,7 @@ class CryptoFlowApp {
 
         // ML Dashboard
         this.mlDashboard = new MLDashboard('mlDashboard');
+        this.mlDashboard.setFootprintChart(this.footprintChart); // Connect chart for channel testing
 
         // FORCE TRUE for debugging (Verify if localstorage is the culprit)
         const isMLVisible = true;
@@ -228,8 +229,15 @@ class CryptoFlowApp {
                 const response = await fetch(`${paperApiUrl}/status`);
                 if (response.ok) {
                     const data = await response.json();
-                    if (data.channel && this.footprintChart) {
-                        this.footprintChart.setChannel(data.channel);
+                    if (this.footprintChart) {
+                        // Set channel data
+                        if (data.channel) {
+                            this.footprintChart.setChannel(data.channel);
+                        }
+                        // Set trade signals for chart markers
+                        if (data.recent_signals) {
+                            this.footprintChart.setTradeSignals(data.recent_signals);
+                        }
                     }
                 }
             } catch (e) {
