@@ -1300,8 +1300,8 @@ class MLPaperTradingService:
                         channel_resistance=channel.resistance,
                         entry_prob=prob
                     )
-                    # Use current candle time for entry_candle_time (TP/SL checked from next candle)
-                    self._process_signal(signal, current_candle_time)
+                    # Use completed candle time (entry at A's close, TP/SL check from B onwards)
+                    self._process_signal(signal, completed_candle_time)
                     self.recent_signals.add(signal_key)
 
             # Resistance bounce → SHORT (on completed candle)
@@ -1327,7 +1327,8 @@ class MLPaperTradingService:
                         channel_resistance=channel.resistance,
                         entry_prob=prob
                     )
-                    self._process_signal(signal, current_candle_time)
+                    # Use completed candle time (entry at A's close, TP/SL check from B onwards)
+                    self._process_signal(signal, completed_candle_time)
                     self.recent_signals.add(signal_key)
 
         # Update last processed candle time
