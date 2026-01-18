@@ -217,12 +217,12 @@ class MLPaperTradingService:
             c = conn.cursor()
 
             # Check if tables exist
-            c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='strategy_stats'")
+            c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='strategy_states'")
             if c.fetchone():
                 # Load strategy stats from last snapshot
                 for strategy_name in self.strategies:
                     c.execute('''SELECT capital, peak_capital, total_trades, wins, losses, total_pnl, max_drawdown
-                                 FROM strategy_stats WHERE strategy = ? ORDER BY timestamp DESC LIMIT 1''',
+                                 FROM strategy_states WHERE strategy = ? ORDER BY timestamp DESC LIMIT 1''',
                               (strategy_name,))
                     row = c.fetchone()
                     if row:
@@ -236,7 +236,7 @@ class MLPaperTradingService:
                         state.max_drawdown = row[6]
                         print(f"[LOAD] {strategy_name}: capital=${state.capital:,.2f}, trades={state.total_trades}")
             else:
-                print("[LOAD] No strategy_stats table yet, starting fresh")
+                print("[LOAD] No strategy_states table yet, starting fresh")
 
             # Check if trades table exists
             c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='trades'")
