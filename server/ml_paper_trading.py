@@ -33,13 +33,13 @@ MODELS_DIR = os.path.join(SCRIPT_DIR, '..', 'backtest', 'models')
 
 # Configuration
 SYMBOL = "BINANCE:BTCUSDT"
-HTF = "15m"  # 채널 감지
-LTF = "5m"   # 진입
+HTF = "1h"   # 채널 감지
+LTF = "15m"  # 진입
 SERVICE_PORT = 5003
 
 # Strategy parameters
 TOUCH_THRESHOLD = 0.003
-SL_BUFFER_PCT = 0.002
+SL_BUFFER_PCT = 0.0008  # Match backtest settings
 ENTRY_THRESHOLD = 0.7
 
 # Paper trading parameters
@@ -835,59 +835,8 @@ class MLPaperTradingService:
 
         mid_price = (channel.resistance + channel.support) / 2
 
-        # Check for fakeout signal
-        fakeout = self._check_fakeout(df_1h, channel)
-        if fakeout:
-            f_channel = fakeout['channel']
-            f_mid = (f_channel.resistance + f_channel.support) / 2
-
-            if fakeout['type'] == 'bear':
-                entry = current_close
-                sl = fakeout['extreme'] * (1 - SL_BUFFER_PCT)
-                tp1 = f_mid
-                tp2 = f_channel.resistance * 0.998
-
-                if entry > sl and tp1 > entry:
-                    # Get ML entry probability
-                    features = self._extract_entry_features(df_15m, len(df_15m)-1, f_channel, 'LONG', 'FAKEOUT', fakeout['extreme'])
-                    take, prob = self._predict_entry(features)
-
-                    signal = Signal(
-                        timestamp=str(current_time),
-                        direction='LONG',
-                        setup_type='FAKEOUT',
-                        entry_price=entry,
-                        sl_price=sl,
-                        tp1_price=tp1,
-                        tp2_price=tp2,
-                        channel_support=f_channel.support,
-                        channel_resistance=f_channel.resistance,
-                        entry_prob=prob
-                    )
-                    self._process_signal(signal)
-            else:
-                entry = current_close
-                sl = fakeout['extreme'] * (1 + SL_BUFFER_PCT)
-                tp1 = f_mid
-                tp2 = f_channel.support * 1.002
-
-                if sl > entry and entry > tp1:
-                    features = self._extract_entry_features(df_15m, len(df_15m)-1, f_channel, 'SHORT', 'FAKEOUT', fakeout['extreme'])
-                    take, prob = self._predict_entry(features)
-
-                    signal = Signal(
-                        timestamp=str(current_time),
-                        direction='SHORT',
-                        setup_type='FAKEOUT',
-                        entry_price=entry,
-                        sl_price=sl,
-                        tp1_price=tp1,
-                        tp2_price=tp2,
-                        channel_support=f_channel.support,
-                        channel_resistance=f_channel.resistance,
-                        entry_prob=prob
-                    )
-                    self._process_signal(signal)
+        # FAKEOUT DISABLED - avg PnL was -0.10% after fixing lookahead bias
+        # Only using BOUNCE entries which have +1.60% avg PnL
 
         # Check for bounce signals
         signal_key = f"{round(channel.support)}_{round(channel.resistance)}_{str(current_time)[:13]}"

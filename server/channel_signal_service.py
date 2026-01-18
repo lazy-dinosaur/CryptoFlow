@@ -4,7 +4,7 @@ Channel Strategy Signal Service
 
 Real-time signal generator for MTF Channel Strategy:
 - HTF (1H): Channel detection
-- LTF (15m): Entry signals (BOUNCE + FAKEOUT)
+- LTF (15m): Entry signals (BOUNCE only - FAKEOUT disabled due to negative avg PnL)
 
 Features:
 - Real-time channel tracking
@@ -566,45 +566,8 @@ def generate_signals(channel: Channel, ltf_candles: pd.DataFrame, fakeout_signal
         )
         signals.append(signal)
 
-    # Check for FAKEOUT signals
-    for fs in fakeout_signals:
-        f_channel = fs['channel']
-        f_mid = (f_channel.resistance + f_channel.support) / 2
-
-        if fs['type'] == 'bear':
-            sl_price = fs['extreme'] * (1 - SL_BUFFER_PCT)
-            position_size = calculate_position_size(current_close, sl_price)
-            signal = Signal(
-                timestamp=current_time,
-                symbol=SYMBOL,
-                direction='LONG',
-                setup_type='FAKEOUT',
-                entry_price=current_close,
-                sl_price=sl_price,
-                tp1_price=f_mid,
-                tp2_price=f_channel.resistance * 0.998,
-                channel_support=f_channel.support,
-                channel_resistance=f_channel.resistance,
-                position_size=position_size
-            )
-            signals.append(signal)
-        else:
-            sl_price = fs['extreme'] * (1 + SL_BUFFER_PCT)
-            position_size = calculate_position_size(current_close, sl_price)
-            signal = Signal(
-                timestamp=current_time,
-                symbol=SYMBOL,
-                direction='SHORT',
-                setup_type='FAKEOUT',
-                entry_price=current_close,
-                sl_price=sl_price,
-                tp1_price=f_mid,
-                tp2_price=f_channel.support * 1.002,
-                channel_support=f_channel.support,
-                channel_resistance=f_channel.resistance,
-                position_size=position_size
-            )
-            signals.append(signal)
+    # FAKEOUT DISABLED - avg PnL was -0.10% after fixing lookahead bias
+    # Only using BOUNCE entries which have +1.60% avg PnL
 
     return signals
 
@@ -807,10 +770,7 @@ def signal_loop():
                     print(f"  Active Channel: {channel.support:.2f} - {channel.resistance:.2f}")
                     print(f"  Touches: S={channel.support_touches}, R={channel.resistance_touches}")
 
-                # Check fakeouts
-                fakeout_signals = check_fakeout_signals(htf_candles, channel)
-                if fakeout_signals:
-                    print(f"  Fakeout signals: {len(fakeout_signals)}")
+                # FAKEOUT disabled - negative avg PnL
 
             if last_ltf_time != current_ltf_time:
                 last_ltf_time = current_ltf_time
@@ -822,10 +782,9 @@ def signal_loop():
                 # Update active signals
                 update_signal_status(ltf_candles)
 
-                # Generate new signals
+                # Generate new signals (BOUNCE only)
                 if channel:
-                    fakeout_signals = check_fakeout_signals(htf_candles, channel)
-                    new_signals = generate_signals(channel, ltf_candles, fakeout_signals)
+                    new_signals = generate_signals(channel, ltf_candles, [])
 
                     for signal in new_signals:
                         # Avoid duplicate signals
