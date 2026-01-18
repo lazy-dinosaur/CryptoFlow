@@ -832,6 +832,160 @@ class MLPaperTradingService:
 
         return swing_highs, swing_lows
 
+    def _initialize_channels(self, df_1h: pd.DataFrame) -> Optional[Channel]:
+        """
+        Initialize channels from historical data (called once at startup).
+        Simulates the backtest's for-loop through all candles to build channels.
+        """
+        if len(df_1h) < 20:
+            return None
+
+        print(f"[CHANNEL] Initializing from {len(df_1h)} historical candles...")
+
+        # Configuration
+        max_channel_width = 0.05
+        min_channel_width = 0.008
+        touch_threshold = 0.004
+
+        # Find all swing points
+        swing_highs, swing_lows = self._find_swing_points(df_1h)
+        self.all_swing_highs = swing_highs
+        self.all_swing_lows = swing_lows
+
+        print(f"[CHANNEL] Found {len(swing_highs)} swing highs, {len(swing_lows)} swing lows")
+
+        highs = df_1h['high'].values
+        lows = df_1h['low'].values
+        closes = df_1h['close'].values
+
+        # Clear existing channels
+        self.active_channels = {}
+
+        # Simulate backtest loop - process each candle
+        for current_idx in range(len(df_1h)):
+            current_close = closes[current_idx]
+
+            # Find new swing points confirmed at this index
+            new_high = None
+            new_low = None
+            for sh in swing_highs:
+                if sh['idx'] + 3 == current_idx:
+                    new_high = sh
+                    break
+            for sl in swing_lows:
+                if sl['idx'] + 3 == current_idx:
+                    new_low = sl
+                    break
+
+            # Valid swing points confirmed by current index
+            valid_swing_lows = [sl for sl in swing_lows if sl['idx'] + 3 <= current_idx]
+            valid_swing_highs = [sh for sh in swing_highs if sh['idx'] + 3 <= current_idx]
+
+            # Create NEW channels from new swing points
+            if new_high:
+                for sl in valid_swing_lows[-30:]:
+                    if sl['idx'] < new_high['idx'] - 100:
+                        continue
+                    if new_high['price'] > sl['price']:
+                        width_pct = (new_high['price'] - sl['price']) / sl['price']
+                        if min_channel_width <= width_pct <= max_channel_width:
+                            key = (new_high['idx'], sl['idx'])
+                            if key not in self.active_channels:
+                                self.active_channels[key] = Channel(
+                                    support=sl['price'],
+                                    resistance=new_high['price'],
+                                    support_touches=1,
+                                    resistance_touches=1,
+                                    lowest_low=sl['price'],
+                                    highest_high=new_high['price'],
+                                    confirmed=False
+                                )
+
+            if new_low:
+                for sh in valid_swing_highs[-30:]:
+                    if sh['idx'] < new_low['idx'] - 100:
+                        continue
+                    if sh['price'] > new_low['price']:
+                        width_pct = (sh['price'] - new_low['price']) / new_low['price']
+                        if min_channel_width <= width_pct <= max_channel_width:
+                            key = (sh['idx'], new_low['idx'])
+                            if key not in self.active_channels:
+                                self.active_channels[key] = Channel(
+                                    support=new_low['price'],
+                                    resistance=sh['price'],
+                                    support_touches=1,
+                                    resistance_touches=1,
+                                    lowest_low=new_low['price'],
+                                    highest_high=sh['price'],
+                                    confirmed=False
+                                )
+
+            # Update existing channels
+            keys_to_remove = []
+            for key, channel in self.active_channels.items():
+                if current_close < channel.lowest_low * 0.96 or current_close > channel.highest_high * 1.04:
+                    keys_to_remove.append(key)
+                    continue
+
+                # Update with new swing points (evolving logic)
+                if new_low and new_low['price'] < channel.resistance:
+                    if new_low['price'] < channel.lowest_low:
+                        channel.lowest_low = new_low['price']
+                        channel.support = new_low['price']
+                        channel.support_touches = 1
+                    elif new_low['price'] > channel.lowest_low and new_low['price'] < channel.support:
+                        channel.support = new_low['price']
+                        channel.support_touches += 1
+                    elif abs(new_low['price'] - channel.support) / channel.support < touch_threshold:
+                        channel.support_touches += 1
+
+                if new_high and new_high['price'] > channel.support:
+                    if new_high['price'] > channel.highest_high:
+                        channel.highest_high = new_high['price']
+                        channel.resistance = new_high['price']
+                        channel.resistance_touches = 1
+                    elif new_high['price'] < channel.highest_high and new_high['price'] > channel.resistance:
+                        channel.resistance = new_high['price']
+                        channel.resistance_touches += 1
+                    elif abs(new_high['price'] - channel.resistance) / channel.resistance < touch_threshold:
+                        channel.resistance_touches += 1
+
+                # Check confirmation
+                if channel.support_touches >= 2 and channel.resistance_touches >= 2:
+                    channel.confirmed = True
+
+                # Check width
+                width_pct = (channel.resistance - channel.support) / channel.support
+                if width_pct > max_channel_width or width_pct < min_channel_width:
+                    keys_to_remove.append(key)
+
+            for key in keys_to_remove:
+                del self.active_channels[key]
+
+        # Find best confirmed channel
+        current_close = closes[-1]
+        best_channel = None
+        best_score = -1
+
+        for key, channel in self.active_channels.items():
+            if not channel.confirmed:
+                continue
+            if current_close < channel.support * 0.98 or current_close > channel.resistance * 1.02:
+                continue
+            score = channel.support_touches + channel.resistance_touches
+            if score > best_score:
+                best_score = score
+                best_channel = channel
+
+        confirmed_count = sum(1 for c in self.active_channels.values() if c.confirmed)
+        print(f"[CHANNEL] Initialized: Active={len(self.active_channels)}, Confirmed={confirmed_count}")
+        if best_channel:
+            print(f"[CHANNEL] Best: S={best_channel.support:.0f}({best_channel.support_touches}) R={best_channel.resistance:.0f}({best_channel.resistance_touches})")
+
+        self.current_channel = best_channel
+        self.last_htf_idx = len(df_1h) - 1
+        return best_channel
+
     def _update_channel(self, df_1h: pd.DataFrame) -> Optional[Channel]:
         """
         Update channel detection using EVOLVING channel logic (matches backtest).
@@ -1052,6 +1206,11 @@ class MLPaperTradingService:
 
         # Update channel
         current_price = df_1h['close'].iloc[-1]
+
+        # Initialize channels from historical data if empty (first run or after restart)
+        if not self.active_channels:
+            print(f"[CHANNEL] No active channels, initializing from historical data...")
+            self._initialize_channels(df_1h)
 
         # Invalidate old channel if price moved too far (>3% away)
         if hasattr(self, 'current_channel') and self.current_channel:
