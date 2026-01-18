@@ -142,6 +142,9 @@ class MLPaperTradingService:
         # Signal counter
         self.signal_counter = 0
 
+        # Track last processed candle time for candle-close entry (like backtest)
+        self.last_processed_candle_time = 0
+
     def _load_models(self):
         """Load trained ML models."""
         try:
@@ -965,41 +968,56 @@ class MLPaperTradingService:
         current_close = df_15m['close'].iloc[-1]
         current_high = df_15m['high'].iloc[-1]
         current_low = df_15m['low'].iloc[-1]
-        # Always use current time for signal timestamp (more reliable than candle time)
-        current_time_ms = int(datetime.now().timestamp() * 1000)
-        # Get 15m candle start time for lookahead bias prevention
-        entry_candle_time = int(df_15m['time'].iloc[-1].timestamp() * 1000)
+        current_candle_time = int(df_15m['time'].iloc[-1].timestamp() * 1000)
 
         # Save current price for API
         self.last_price = current_close
 
-        # Update existing trades first
+        # Update existing trades with current candle data
         self._update_trades(current_close, current_high, current_low, df_15m, len(df_15m)-1)
+
+        # ===== CANDLE-CLOSE ENTRY (like backtest) =====
+        # Only check for new signals when a NEW candle starts
+        # This means the previous candle just completed
+        if current_candle_time == self.last_processed_candle_time:
+            # Same candle, skip signal detection
+            return
+
+        # New candle detected - check the COMPLETED candle (index -2)
+        if len(df_15m) < 3:
+            self.last_processed_candle_time = current_candle_time
+            return
+
+        # Use the completed candle (previous candle, index -2)
+        completed_idx = len(df_15m) - 2
+        completed_close = df_15m['close'].iloc[completed_idx]
+        completed_high = df_15m['high'].iloc[completed_idx]
+        completed_low = df_15m['low'].iloc[completed_idx]
+        completed_candle_time = int(df_15m['time'].iloc[completed_idx].timestamp() * 1000)
+
+        print(f"[SCAN] New candle detected! Checking completed candle at {df_15m['time'].iloc[completed_idx]}")
 
         mid_price = (channel.resistance + channel.support) / 2
 
-        # FAKEOUT DISABLED - avg PnL was -0.10% after fixing lookahead bias
-        # Only using BOUNCE entries which have +1.60% avg PnL
-
-        # Check for bounce signals
-        signal_key = f"{round(channel.support)}_{round(channel.resistance)}_{current_time_ms // 3600000}"
+        # Check for bounce signals on COMPLETED candle
+        signal_key = f"{round(channel.support)}_{round(channel.resistance)}_{completed_candle_time}"
         if not hasattr(self, 'recent_signals'):
             self.recent_signals = set()
 
         if signal_key not in self.recent_signals:
-            # Support bounce → LONG
-            if current_low <= channel.support * (1 + TOUCH_THRESHOLD) and current_close > channel.support:
-                entry = current_close
+            # Support bounce → LONG (on completed candle)
+            if completed_low <= channel.support * (1 + TOUCH_THRESHOLD) and completed_close > channel.support:
+                entry = completed_close  # Enter at completed candle's close
                 sl = channel.support * (1 - SL_BUFFER_PCT)
                 tp1 = mid_price
                 tp2 = channel.resistance * 0.998
 
                 if entry > sl and tp1 > entry:
-                    features = self._extract_entry_features(df_15m, len(df_15m)-1, channel, 'LONG', 'BOUNCE', None)
+                    features = self._extract_entry_features(df_15m, completed_idx, channel, 'LONG', 'BOUNCE', None)
                     take, prob = self._predict_entry(features)
 
                     signal = Signal(
-                        timestamp=str(current_time_ms),
+                        timestamp=str(completed_candle_time),
                         direction='LONG',
                         setup_type='BOUNCE',
                         entry_price=entry,
@@ -1010,22 +1028,23 @@ class MLPaperTradingService:
                         channel_resistance=channel.resistance,
                         entry_prob=prob
                     )
-                    self._process_signal(signal, entry_candle_time)
+                    # Use current candle time for entry_candle_time (TP/SL checked from next candle)
+                    self._process_signal(signal, current_candle_time)
                     self.recent_signals.add(signal_key)
 
-            # Resistance bounce → SHORT
-            elif current_high >= channel.resistance * (1 - TOUCH_THRESHOLD) and current_close < channel.resistance:
-                entry = current_close
+            # Resistance bounce → SHORT (on completed candle)
+            elif completed_high >= channel.resistance * (1 - TOUCH_THRESHOLD) and completed_close < channel.resistance:
+                entry = completed_close  # Enter at completed candle's close
                 sl = channel.resistance * (1 + SL_BUFFER_PCT)
                 tp1 = mid_price
                 tp2 = channel.support * 1.002
 
                 if sl > entry and entry > tp1:
-                    features = self._extract_entry_features(df_15m, len(df_15m)-1, channel, 'SHORT', 'BOUNCE', None)
+                    features = self._extract_entry_features(df_15m, completed_idx, channel, 'SHORT', 'BOUNCE', None)
                     take, prob = self._predict_entry(features)
 
                     signal = Signal(
-                        timestamp=str(current_time_ms),
+                        timestamp=str(completed_candle_time),
                         direction='SHORT',
                         setup_type='BOUNCE',
                         entry_price=entry,
@@ -1036,8 +1055,11 @@ class MLPaperTradingService:
                         channel_resistance=channel.resistance,
                         entry_prob=prob
                     )
-                    self._process_signal(signal, entry_candle_time)
+                    self._process_signal(signal, current_candle_time)
                     self.recent_signals.add(signal_key)
+
+        # Update last processed candle time
+        self.last_processed_candle_time = current_candle_time
 
         # Clean old signal keys
         if len(self.recent_signals) > 100:
