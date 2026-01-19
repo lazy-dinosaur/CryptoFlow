@@ -82,12 +82,15 @@ app.get('/api/candles', (req, res) => {
         1: 'candles_1',
         5: 'candles_5',
         15: 'candles_15',
-        60: 'candles_60'
+        30: 'candles_30',
+        60: 'candles_60',
+        240: 'candles_240',
+        1440: 'candles_1440'
     };
 
     const table = tableMap[tf];
     if (!table) {
-        return res.status(400).json({ error: 'Invalid timeframe. Use 1, 5, 15, or 60' });
+        return res.status(400).json({ error: 'Invalid timeframe. Use 1, 5, 15, 30, 60, 240, or 1440' });
     }
 
     try {
