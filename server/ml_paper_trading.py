@@ -33,12 +33,26 @@ PAPER_DB_PATH = os.path.join(SCRIPT_DIR, 'data', 'ml_paper_trading.db')
 # DB connection helper with timeout to prevent corruption
 DB_TIMEOUT = 30  # seconds
 
-def get_db_connection(db_path):
-    """Create DB connection with proper timeout and WAL mode"""
-    conn = sqlite3.connect(db_path, timeout=DB_TIMEOUT)
-    conn.execute('PRAGMA journal_mode=WAL')
+def get_db_connection(db_path, readonly=False):
+    """Create DB connection with proper timeout and WAL mode
+    
+    Args:
+        db_path: Path to the database file
+        readonly: If True, open in read-only mode (safer for shared DBs)
+    """
+    if readonly:
+        # Read-only URI mode - prevents write locks and corruption
+        uri = f"file:{db_path}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=DB_TIMEOUT)
+    else:
+        conn = sqlite3.connect(db_path, timeout=DB_TIMEOUT)
+        conn.execute('PRAGMA journal_mode=WAL')
     conn.execute('PRAGMA busy_timeout=30000')
     return conn
+
+def get_readonly_connection(db_path):
+    """Convenience function for read-only DB access (use for cryptoflow.db)"""
+    return get_db_connection(db_path, readonly=True)
 MODELS_DIR = os.path.join(SCRIPT_DIR, '..', 'backtest', 'models')
 
 # Configuration
@@ -390,7 +404,7 @@ class MLPaperTradingService:
         }
         tf_minutes = tf_to_minutes.get(timeframe, timeframe)
 
-        conn = get_db_connection(DB_PATH)
+        conn = get_readonly_connection(DB_PATH)  # Read-only to prevent corruption
         query = f'''
             SELECT time, open, high, low, close, volume, delta
             FROM candles_{tf_minutes}
