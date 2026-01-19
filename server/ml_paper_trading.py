@@ -31,7 +31,8 @@ DB_PATH = os.path.join(SCRIPT_DIR, 'data', 'cryptoflow.db')
 PAPER_DB_PATH = os.path.join(SCRIPT_DIR, 'data', 'ml_paper_trading.db')
 
 # DB connection helper with timeout to prevent corruption
-DB_TIMEOUT = 30  # seconds
+# Keep timeout short for real-time trading - retry on next scan if busy
+DB_TIMEOUT = 5  # seconds (was 30 - too long for real-time)
 
 def get_db_connection(db_path, readonly=False):
     """Create DB connection with proper timeout and WAL mode
@@ -47,7 +48,7 @@ def get_db_connection(db_path, readonly=False):
     else:
         conn = sqlite3.connect(db_path, timeout=DB_TIMEOUT)
         conn.execute('PRAGMA journal_mode=WAL')
-    conn.execute('PRAGMA busy_timeout=30000')
+    conn.execute('PRAGMA busy_timeout=5000')  # 5s - short for real-time trading
     return conn
 
 def get_readonly_connection(db_path):
