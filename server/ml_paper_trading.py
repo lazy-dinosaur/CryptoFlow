@@ -1517,9 +1517,11 @@ class MLPaperTradingService:
                             'active_trade_details': active_trade_details
                         }
 
-                    # Add recent signals from database
+                    # Add recent signals from database (with short timeout to prevent blocking)
                     try:
-                        conn = get_db_connection(PAPER_DB_PATH)
+                        # Use short timeout (2s) to prevent HTTP blocking
+                        conn = sqlite3.connect(PAPER_DB_PATH, timeout=2)
+                        conn.execute('PRAGMA busy_timeout=2000')
                         c = conn.cursor()
                         c.execute('''SELECT timestamp, direction, setup_type, entry_price, sl_price, tp1_price, tp2_price, entry_prob, channel_support, channel_resistance
                                      FROM signals ORDER BY id DESC LIMIT 10''')
@@ -1545,6 +1547,10 @@ class MLPaperTradingService:
                             })
                         conn.close()
                         status['recent_signals'] = recent_signals
+                    except (sqlite3.OperationalError, sqlite3.DatabaseError) as e:
+                        # DB busy or locked - return empty signals instead of blocking
+                        status['recent_signals'] = []
+                        status['db_status'] = 'busy'
                     except Exception as e:
                         status['recent_signals'] = []
 
