@@ -29,9 +29,19 @@ TIMEFRAME = 1  # 1-minute candles
 MIN_RR = 1.0  # Lowered from 1.5 to get more samples
 TOLERANCE = 0.0002  # Increased tolerance for zone proximity
 
+# DB connection helper with timeout to prevent corruption
+DB_TIMEOUT = 30  # seconds
+
+def get_db_connection(db_path):
+    """Create DB connection with proper timeout and WAL mode"""
+    conn = sqlite3.connect(db_path, timeout=DB_TIMEOUT)
+    conn.execute('PRAGMA journal_mode=WAL')
+    conn.execute('PRAGMA busy_timeout=30000')
+    return conn
+
 def load_candles(db_path, symbol, timeframe):
     """Load candles from SQLite database."""
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection(db_path)
     
     if symbol:
         query = f"""
@@ -351,7 +361,7 @@ def backtest_signal(df, idx, entry, sl, tp, direction='LONG'):
 def load_depth_data(db_path, symbol='BTCUSDT'):
     """Load depth heatmap snapshots from database."""
     try:
-        conn = sqlite3.connect(db_path)
+        conn = get_db_connection(db_path)
         query = """
             SELECT time, bids, asks 
             FROM heatmap_snapshots 
@@ -382,7 +392,7 @@ def load_depth_data(db_path, symbol='BTCUSDT'):
 def load_whale_trades(db_path, symbol='btcusdt', threshold=5.0):
     """Load whale (large) trades from database."""
     try:
-        conn = sqlite3.connect(db_path)
+        conn = get_db_connection(db_path)
         query = """
             SELECT time, price, quantity, is_buyer_maker 
             FROM big_trades 
