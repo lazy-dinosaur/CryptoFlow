@@ -26,3 +26,6 @@ backtest/results/
 
 # Research
 research/
+
+# PM2 logs
+server/logs/*.log
