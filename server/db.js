@@ -16,8 +16,11 @@ if (!fs.existsSync(DATA_DIR)) {
 const DB_PATH = path.join(DATA_DIR, 'cryptoflow.db');
 const db = new Database(DB_PATH);
 
-// Enable WAL mode for better concurrency
+// Enable WAL mode and configure for multi-process access
 db.pragma('journal_mode = WAL');
+db.pragma('busy_timeout = 30000');  // Wait up to 30 seconds if locked
+db.pragma('synchronous = NORMAL');  // Balance between safety and speed
+db.pragma('wal_autocheckpoint = 1000');  // Checkpoint every 1000 pages
 
 /**
  * Initialize database schema

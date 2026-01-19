@@ -30,6 +30,16 @@ import urllib.parse
 DB_PATH = os.path.join(os.path.dirname(__file__), 'data', 'cryptoflow.db')
 SIGNAL_DB_PATH = os.path.join(os.path.dirname(__file__), 'data', 'channel_signals.db')
 
+# DB connection helper with timeout to prevent corruption
+DB_TIMEOUT = 30  # seconds
+
+def get_db_connection(db_path):
+    """Create DB connection with proper timeout and WAL mode"""
+    conn = sqlite3.connect(db_path, timeout=DB_TIMEOUT)
+    conn.execute('PRAGMA journal_mode=WAL')
+    conn.execute('PRAGMA busy_timeout=30000')
+    return conn
+
 # Configuration
 SYMBOL = "BTCUSDT"
 HTF = "1h"
@@ -110,7 +120,7 @@ paper_state: PaperTradingState = PaperTradingState()
 
 def init_signal_db():
     """Initialize signal tracking database."""
-    conn = sqlite3.connect(SIGNAL_DB_PATH)
+    conn = get_db_connection(SIGNAL_DB_PATH)
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -188,7 +198,7 @@ def init_signal_db():
 def load_paper_state():
     """Load paper trading state from database."""
     global paper_state
-    conn = sqlite3.connect(SIGNAL_DB_PATH)
+    conn = get_db_connection(SIGNAL_DB_PATH)
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -218,7 +228,7 @@ def load_paper_state():
 
 def save_paper_state():
     """Save paper trading state to database."""
-    conn = sqlite3.connect(SIGNAL_DB_PATH)
+    conn = get_db_connection(SIGNAL_DB_PATH)
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -241,7 +251,7 @@ def save_paper_state():
 
 def save_equity_point(trade_id: int):
     """Save equity curve point after trade."""
-    conn = sqlite3.connect(SIGNAL_DB_PATH)
+    conn = get_db_connection(SIGNAL_DB_PATH)
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -255,7 +265,7 @@ def save_equity_point(trade_id: int):
 
 def load_htf_candles(limit: int = 500) -> pd.DataFrame:
     """Load recent HTF candles from database."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection(DB_PATH)
 
     table_name = f"candles_{HTF}"
     query = f"""
@@ -280,7 +290,7 @@ def load_htf_candles(limit: int = 500) -> pd.DataFrame:
 
 def load_ltf_candles(limit: int = 100) -> pd.DataFrame:
     """Load recent LTF candles from database."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection(DB_PATH)
 
     table_name = f"candles_{LTF}"
     query = f"""
@@ -574,7 +584,7 @@ def generate_signals(channel: Channel, ltf_candles: pd.DataFrame, fakeout_signal
 
 def save_signal(signal: Signal) -> int:
     """Save signal to database and return the signal ID."""
-    conn = sqlite3.connect(SIGNAL_DB_PATH)
+    conn = get_db_connection(SIGNAL_DB_PATH)
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -598,7 +608,7 @@ def save_signal(signal: Signal) -> int:
 
 def update_signal_in_db(signal: Signal, signal_id: int):
     """Update completed signal in database."""
-    conn = sqlite3.connect(SIGNAL_DB_PATH)
+    conn = get_db_connection(SIGNAL_DB_PATH)
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -877,7 +887,7 @@ class SignalHandler(BaseHTTPRequestHandler):
 
         elif path == '/equity':
             # Return equity curve data
-            conn = sqlite3.connect(SIGNAL_DB_PATH)
+            conn = get_db_connection(SIGNAL_DB_PATH)
             cursor = conn.cursor()
             cursor.execute("SELECT timestamp, capital FROM equity_curve ORDER BY id")
             rows = cursor.fetchall()

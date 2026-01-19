@@ -29,6 +29,16 @@ import urllib.parse
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(SCRIPT_DIR, 'data', 'cryptoflow.db')
 PAPER_DB_PATH = os.path.join(SCRIPT_DIR, 'data', 'ml_paper_trading.db')
+
+# DB connection helper with timeout to prevent corruption
+DB_TIMEOUT = 30  # seconds
+
+def get_db_connection(db_path):
+    """Create DB connection with proper timeout and WAL mode"""
+    conn = sqlite3.connect(db_path, timeout=DB_TIMEOUT)
+    conn.execute('PRAGMA journal_mode=WAL')
+    conn.execute('PRAGMA busy_timeout=30000')
+    return conn
 MODELS_DIR = os.path.join(SCRIPT_DIR, '..', 'backtest', 'models')
 
 # Configuration
@@ -167,7 +177,7 @@ class MLPaperTradingService:
         """Initialize SQLite database for paper trading."""
         os.makedirs(os.path.dirname(PAPER_DB_PATH), exist_ok=True)
 
-        conn = sqlite3.connect(PAPER_DB_PATH)
+        conn = get_db_connection(PAPER_DB_PATH)
         c = conn.cursor()
 
         # Signals table
@@ -235,7 +245,7 @@ class MLPaperTradingService:
     def _load_state(self):
         """Load strategy state and active trades from database."""
         try:
-            conn = sqlite3.connect(PAPER_DB_PATH)
+            conn = get_db_connection(PAPER_DB_PATH)
             c = conn.cursor()
 
             # Check if tables exist
@@ -304,7 +314,7 @@ class MLPaperTradingService:
 
     def _save_signal(self, signal: Signal) -> int:
         """Save signal to database and return ID. Returns -1 if duplicate."""
-        conn = sqlite3.connect(PAPER_DB_PATH)
+        conn = get_db_connection(PAPER_DB_PATH)
         c = conn.cursor()
 
         # Check for duplicate signal (same timestamp and direction)
@@ -331,7 +341,7 @@ class MLPaperTradingService:
 
     def _save_trade(self, trade: Trade) -> int:
         """Save trade to database."""
-        conn = sqlite3.connect(PAPER_DB_PATH)
+        conn = get_db_connection(PAPER_DB_PATH)
         c = conn.cursor()
         c.execute('''INSERT INTO trades
             (signal_id, strategy, timestamp, direction, setup_type, entry_price, sl_price,
@@ -350,7 +360,7 @@ class MLPaperTradingService:
 
     def _update_trade(self, trade: Trade):
         """Update trade in database."""
-        conn = sqlite3.connect(PAPER_DB_PATH)
+        conn = get_db_connection(PAPER_DB_PATH)
         c = conn.cursor()
         c.execute('''UPDATE trades SET status=?, exit_decision=?, pnl_pct=?, closed_at=?, tp1_profit_taken=?
             WHERE id=?''',
@@ -361,7 +371,7 @@ class MLPaperTradingService:
 
     def _save_strategy_state(self, strategy: str, state: StrategyState):
         """Save strategy state snapshot."""
-        conn = sqlite3.connect(PAPER_DB_PATH)
+        conn = get_db_connection(PAPER_DB_PATH)
         c = conn.cursor()
         c.execute('''INSERT INTO strategy_states
             (timestamp, strategy, capital, peak_capital, total_trades, wins, losses, total_pnl, max_drawdown)
@@ -380,7 +390,7 @@ class MLPaperTradingService:
         }
         tf_minutes = tf_to_minutes.get(timeframe, timeframe)
 
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection(DB_PATH)
         query = f'''
             SELECT time, open, high, low, close, volume, delta
             FROM candles_{tf_minutes}
@@ -1495,7 +1505,7 @@ class MLPaperTradingService:
 
                     # Add recent signals from database
                     try:
-                        conn = sqlite3.connect(PAPER_DB_PATH)
+                        conn = get_db_connection(PAPER_DB_PATH)
                         c = conn.cursor()
                         c.execute('''SELECT timestamp, direction, setup_type, entry_price, sl_price, tp1_price, tp2_price, entry_prob, channel_support, channel_resistance
                                      FROM signals ORDER BY id DESC LIMIT 10''')

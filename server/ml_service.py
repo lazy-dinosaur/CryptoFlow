@@ -29,6 +29,16 @@ SERVICE_PORT = 5001
 RETRAIN_INTERVAL_HOURS = 6
 STATUS_DB_PATH = os.path.join(os.path.dirname(__file__), 'data', 'ml_status.db')
 
+# DB connection helper with timeout to prevent corruption
+DB_TIMEOUT = 30  # seconds
+
+def get_db_connection(db_path):
+    """Create DB connection with proper timeout and WAL mode"""
+    conn = sqlite3.connect(db_path, timeout=DB_TIMEOUT)
+    conn.execute('PRAGMA journal_mode=WAL')
+    conn.execute('PRAGMA busy_timeout=30000')
+    return conn
+
 # Global state
 model = None
 feature_columns = None
@@ -39,7 +49,7 @@ training_history = []
 
 def init_status_db():
     """Initialize status tracking database."""
-    conn = sqlite3.connect(STATUS_DB_PATH)
+    conn = get_db_connection(STATUS_DB_PATH)
     cursor = conn.cursor()
     
     cursor.execute("""
@@ -410,7 +420,7 @@ def save_training_record(sample_count, accuracy, win_rate, top_features,
                          long_accuracy=0, short_accuracy=0,
                          long_winrate=0, short_winrate=0):
     """Save training record to database."""
-    conn = sqlite3.connect(STATUS_DB_PATH)
+    conn = get_db_connection(STATUS_DB_PATH)
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -440,7 +450,7 @@ def save_training_record(sample_count, accuracy, win_rate, top_features,
 def save_signal(symbol, exchange, direction, setup_type, entry, sl, tp, rr, zone_price, confidence, features=None):
     """Save a signal to the database with detailed metrics."""
     try:
-        conn = sqlite3.connect(STATUS_DB_PATH)
+        conn = get_db_connection(STATUS_DB_PATH)
         cursor = conn.cursor()
 
         # Extract key metrics from features
@@ -496,7 +506,7 @@ def save_signal(symbol, exchange, direction, setup_type, entry, sl, tp, rr, zone
 def get_signals(limit=50, direction=None, status=None):
     """Get recent signals from the database with all details."""
     try:
-        conn = sqlite3.connect(STATUS_DB_PATH)
+        conn = get_db_connection(STATUS_DB_PATH)
         cursor = conn.cursor()
 
         query = "SELECT * FROM signals WHERE 1=1"
@@ -543,7 +553,7 @@ def get_signals(limit=50, direction=None, status=None):
 def get_signal_stats():
     """Get signal statistics summary."""
     try:
-        conn = sqlite3.connect(STATUS_DB_PATH)
+        conn = get_db_connection(STATUS_DB_PATH)
         cursor = conn.cursor()
 
         # Total counts by direction
@@ -590,7 +600,7 @@ def get_status():
     history = []
     latest_stats = {}
     try:
-        conn = sqlite3.connect(STATUS_DB_PATH)
+        conn = get_db_connection(STATUS_DB_PATH)
         cursor = conn.cursor()
         cursor.execute("""
             SELECT timestamp, sample_count, accuracy, win_rate,
