@@ -390,8 +390,8 @@ function connectBitget(symbols) {
                     return;
                 }
 
-                // Handle trade data
-                if (msg.action === 'snapshot' && msg.arg?.channel === 'trade' && msg.data) {
+                // Handle trade data (snapshot = initial, update = ongoing)
+                if ((msg.action === 'snapshot' || msg.action === 'update') && msg.arg?.channel === 'trade' && msg.data) {
                     const symbol = msg.arg.instId.toLowerCase();
                     const fullSymbol = `bitget:${symbol}`;
 
