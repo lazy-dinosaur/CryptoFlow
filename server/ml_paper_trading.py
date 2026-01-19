@@ -1228,17 +1228,22 @@ class MLPaperTradingService:
 
         print(f"[SCAN] Loaded {len(df_1h)} 1h candles, {len(df_15m)} 15m candles")
 
-        if len(df_1h) < 20 or len(df_15m) < 20:
-            print(f"[SCAN] Not enough data (need 20+)")
+        if len(df_1h) < 21 or len(df_15m) < 20:
+            print(f"[SCAN] Not enough data (need 21+ 1h, 20+ 15m)")
             return
 
-        # Update channel
-        current_price = df_1h['close'].iloc[-1]
+        # Drop last (incomplete) HTF candle to match backtest behavior
+        # Backtest uses htf_idx - 1 to avoid lookahead bias from partial candles
+        df_1h_closed = df_1h.iloc[:-1].copy()
+        print(f"[SCAN] Using {len(df_1h_closed)} closed 1h candles for channel (dropped incomplete)")
+
+        # Current price from latest 15m candle (for invalidation check)
+        current_price = df_15m['close'].iloc[-1]
 
         # Initialize channels from historical data if empty (first run or after restart)
         if not self.active_channels:
             print(f"[CHANNEL] No active channels, initializing from historical data...")
-            self._initialize_channels(df_1h)
+            self._initialize_channels(df_1h_closed)
 
         # Invalidate old channel if price moved too far (>3% away)
         if hasattr(self, 'current_channel') and self.current_channel:
@@ -1247,7 +1252,7 @@ class MLPaperTradingService:
                 print(f"[CHANNEL] Price {current_price:.0f} out of range, invalidating old channel {ch.support:.0f}-{ch.resistance:.0f}")
                 self.current_channel = None
 
-        channel = self._update_channel(df_1h)
+        channel = self._update_channel(df_1h_closed)
         if channel:
             self.current_channel = channel
             print(f"[CHANNEL] Detected: {channel.support:.0f} - {channel.resistance:.0f} (touches: S={channel.support_touches}, R={channel.resistance_touches})")
