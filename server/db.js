@@ -18,7 +18,7 @@ const db = new Database(DB_PATH);
 
 // Enable WAL mode and configure for multi-process access
 db.pragma('journal_mode = WAL');
-db.pragma('busy_timeout = 30000');  // Wait up to 30 seconds if locked
+db.pragma('busy_timeout = 5000');  // 5 seconds - individual writes are ms-level
 db.pragma('synchronous = NORMAL');  // Balance between safety and speed
 db.pragma('wal_autocheckpoint = 1000');  // Checkpoint every 1000 pages
 
