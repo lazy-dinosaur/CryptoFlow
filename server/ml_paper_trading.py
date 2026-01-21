@@ -72,6 +72,7 @@ INITIAL_CAPITAL = 10000.0
 RISK_PCT = 0.015
 MAX_LEVERAGE = 15
 FEE_PCT = 0.0004
+MAX_HOLD_CANDLES = 150
 
 # Labels
 EXIT_AT_TP1 = 0
@@ -121,8 +122,9 @@ class Trade:
     pnl_pct: float = 0.0
     closed_at: int = 0  # milliseconds
     db_id: int = 0
-    tp1_profit_taken: bool = False  # Track if TP1 profit has been added to capital
+    tp1_profit_taken: bool = False  # Track if TP1 was hit (backtest accounting)
     entry_candle_time: int = 0  # Candle start time at entry (for lookahead bias prevention)
+    entry_capital: float = 0.0  # Capital at entry (backtest accounting)
 
 
 @dataclass
@@ -230,12 +232,17 @@ class MLPaperTradingService:
             closed_at INTEGER,
             tp1_profit_taken INTEGER DEFAULT 0,
             entry_candle_time INTEGER DEFAULT 0,
+            entry_capital REAL DEFAULT 0,
             FOREIGN KEY (signal_id) REFERENCES signals(id)
         )''')
 
         # Add entry_candle_time column if it doesn't exist (for existing DBs)
         try:
             c.execute('ALTER TABLE trades ADD COLUMN entry_candle_time INTEGER DEFAULT 0')
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        try:
+            c.execute('ALTER TABLE trades ADD COLUMN entry_capital REAL DEFAULT 0')
         except sqlite3.OperationalError:
             pass  # Column already exists
 
@@ -294,7 +301,7 @@ class MLPaperTradingService:
                                         entry_price, sl_price, tp1_price, tp2_price,
                                         channel_support, channel_resistance,
                                         status, exit_decision, pnl_pct, closed_at, tp1_profit_taken,
-                                        entry_candle_time
+                                        entry_candle_time, entry_capital
                                  FROM trades WHERE strategy = ? AND status IN ('ACTIVE', 'TP1_HIT')''',
                               (strategy_name,))
                     for row in c.fetchall():
@@ -316,8 +323,11 @@ class MLPaperTradingService:
                             closed_at=row[15] or 0,
                             db_id=row[0],
                             tp1_profit_taken=bool(row[16]) if row[16] is not None else False,
-                            entry_candle_time=row[17] or 0
+                            entry_candle_time=row[17] or 0,
+                            entry_capital=row[18] if len(row) > 18 and row[18] is not None else 0.0
                         )
+                        if trade.entry_capital <= 0:
+                            trade.entry_capital = state.capital
                         state.active_trades.append(trade)
                         print(f"[LOAD] Restored active trade: {trade.direction} {trade.setup_type} @ {trade.entry_price:.2f} ({trade.status})")
             else:
@@ -361,13 +371,13 @@ class MLPaperTradingService:
         c.execute('''INSERT INTO trades
             (signal_id, strategy, timestamp, direction, setup_type, entry_price, sl_price,
              tp1_price, tp2_price, channel_support, channel_resistance, status,
-             exit_decision, pnl_pct, closed_at, tp1_profit_taken, entry_candle_time)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+             exit_decision, pnl_pct, closed_at, tp1_profit_taken, entry_candle_time, entry_capital)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (trade.signal_id, trade.strategy, trade.timestamp, trade.direction,
              trade.setup_type, trade.entry_price, trade.sl_price, trade.tp1_price,
              trade.tp2_price, trade.channel_support, trade.channel_resistance, trade.status,
              trade.exit_decision, trade.pnl_pct, trade.closed_at,
-             1 if trade.tp1_profit_taken else 0, trade.entry_candle_time))
+             1 if trade.tp1_profit_taken else 0, trade.entry_candle_time, trade.entry_capital))
         trade_id = c.lastrowid
         conn.commit()
         conn.close()
@@ -377,10 +387,10 @@ class MLPaperTradingService:
         """Update trade in database."""
         conn = get_db_connection(PAPER_DB_PATH)
         c = conn.cursor()
-        c.execute('''UPDATE trades SET status=?, exit_decision=?, pnl_pct=?, closed_at=?, tp1_profit_taken=?
+        c.execute('''UPDATE trades SET status=?, exit_decision=?, pnl_pct=?, closed_at=?, tp1_profit_taken=?, entry_capital=?
             WHERE id=?''',
             (trade.status, trade.exit_decision, trade.pnl_pct, trade.closed_at,
-             1 if trade.tp1_profit_taken else 0, trade.db_id))
+             1 if trade.tp1_profit_taken else 0, trade.entry_capital, trade.db_id))
         conn.commit()
         conn.close()
 
@@ -637,7 +647,8 @@ class MLPaperTradingService:
             tp2_price=signal.tp2_price,
             channel_support=signal.channel_support,
             channel_resistance=signal.channel_resistance,
-            entry_candle_time=entry_candle_time
+            entry_candle_time=entry_candle_time,
+            entry_capital=self.strategies['NO_ML'].capital
         )
         trade_no_ml.db_id = self._save_trade(trade_no_ml)
         self.strategies['NO_ML'].active_trades.append(trade_no_ml)
@@ -659,7 +670,8 @@ class MLPaperTradingService:
                 tp2_price=signal.tp2_price,
                 channel_support=signal.channel_support,
                 channel_resistance=signal.channel_resistance,
-                entry_candle_time=entry_candle_time
+                entry_candle_time=entry_candle_time,
+                entry_capital=self.strategies['ML_ENTRY'].capital
             )
             trade_ml_entry.db_id = self._save_trade(trade_ml_entry)
             self.strategies['ML_ENTRY'].active_trades.append(trade_ml_entry)
@@ -679,7 +691,8 @@ class MLPaperTradingService:
                 tp2_price=signal.tp2_price,
                 channel_support=signal.channel_support,
                 channel_resistance=signal.channel_resistance,
-                entry_candle_time=entry_candle_time
+                entry_candle_time=entry_candle_time,
+                entry_capital=self.strategies['ML_COMBINED'].capital
             )
             trade_ml_combined.db_id = self._save_trade(trade_ml_combined)
             self.strategies['ML_COMBINED'].active_trades.append(trade_ml_combined)
@@ -706,13 +719,28 @@ class MLPaperTradingService:
                 is_long = trade.direction == 'LONG'
                 closed = False
                 pnl_pct = 0.0
+                timed_out = False
 
                 # Lookahead bias prevention: skip TP/SL check if still in entry candle
                 if trade.entry_candle_time > 0 and current_candle_time <= trade.entry_candle_time:
                     # Still in the entry candle, skip TP/SL check to prevent lookahead bias
                     continue
 
-                if trade.status == 'ACTIVE':
+                if trade.entry_candle_time > 0 and current_candle_time > trade.entry_candle_time:
+                    tf_to_minutes = {
+                        '1m': 1, '5m': 5, '15m': 15, '30m': 30,
+                        '1h': 60, '4h': 240, '1d': 1440
+                    }
+                    ltf_minutes = tf_to_minutes.get(LTF, 15)
+                    candle_ms = ltf_minutes * 60 * 1000
+                    candles_since_entry = int((current_candle_time - trade.entry_candle_time) // candle_ms)
+                    if candles_since_entry >= MAX_HOLD_CANDLES:
+                        trade.status = 'TIMEOUT'
+                        closed = True
+                        timed_out = True
+                        print(f"\n[{strategy_name}] Trade timed out after {candles_since_entry} candles")
+
+                if not timed_out and trade.status == 'ACTIVE':
                     # Check SL
                     if is_long and current_low <= trade.sl_price:
                         trade.status = 'SL_HIT'
@@ -725,81 +753,74 @@ class MLPaperTradingService:
                     # Check TP1
                     elif is_long and current_high >= trade.tp1_price:
                         trade.status = 'TP1_HIT'
-                        # Immediately take 50% profit at TP1
                         if not trade.tp1_profit_taken:
-                            tp1_pnl_pct = 0.5 * (trade.tp1_price - trade.entry_price) / trade.entry_price
-                            sl_dist = abs(trade.entry_price - trade.sl_price) / trade.entry_price
-                            leverage = min(RISK_PCT / sl_dist, MAX_LEVERAGE) if sl_dist > 0 else 1
-                            position = state.capital * leverage
-                            tp1_pnl_dollar = position * tp1_pnl_pct - position * FEE_PCT  # Only 1 fee for partial close
-                            state.capital += tp1_pnl_dollar
-                            state.total_pnl += tp1_pnl_dollar
                             trade.tp1_profit_taken = True
-                            print(f"\n[{strategy_name}] TP1 HIT - 50% profit taken!")
-                            print(f"  TP1 PnL: {tp1_pnl_pct*100:+.2f}% (${tp1_pnl_dollar:+.2f})")
-                            print(f"  Capital: ${state.capital:,.2f}")
+                            print(f"\n[{strategy_name}] TP1 HIT - tracking partial profit")
                         # For ML_COMBINED, decide exit at TP1
                         if strategy_name == 'ML_COMBINED' and self.exit_model is not None and df_15m is not None:
                             trade.exit_decision = 'HOLD'  # Default to HOLD for now
                     elif not is_long and current_low <= trade.tp1_price:
                         trade.status = 'TP1_HIT'
-                        # Immediately take 50% profit at TP1
                         if not trade.tp1_profit_taken:
-                            tp1_pnl_pct = 0.5 * (trade.entry_price - trade.tp1_price) / trade.entry_price
-                            sl_dist = abs(trade.entry_price - trade.sl_price) / trade.entry_price
-                            leverage = min(RISK_PCT / sl_dist, MAX_LEVERAGE) if sl_dist > 0 else 1
-                            position = state.capital * leverage
-                            tp1_pnl_dollar = position * tp1_pnl_pct - position * FEE_PCT
-                            state.capital += tp1_pnl_dollar
-                            state.total_pnl += tp1_pnl_dollar
                             trade.tp1_profit_taken = True
-                            print(f"\n[{strategy_name}] TP1 HIT - 50% profit taken!")
-                            print(f"  TP1 PnL: {tp1_pnl_pct*100:+.2f}% (${tp1_pnl_dollar:+.2f})")
-                            print(f"  Capital: ${state.capital:,.2f}")
+                            print(f"\n[{strategy_name}] TP1 HIT - tracking partial profit")
                         if strategy_name == 'ML_COMBINED' and self.exit_model is not None:
                             trade.exit_decision = 'HOLD'
 
-                elif trade.status == 'TP1_HIT':
-                    # Check TP2 - only remaining 50% profit
-                    if is_long and current_high >= trade.tp2_price:
-                        trade.status = 'TP2_HIT'
-                        pnl_pct = 0.5 * (trade.tp2_price - trade.entry_price) / trade.entry_price  # Only remaining 50%
-                        closed = True
-                    elif not is_long and current_low <= trade.tp2_price:
-                        trade.status = 'TP2_HIT'
-                        pnl_pct = 0.5 * (trade.entry_price - trade.tp2_price) / trade.entry_price  # Only remaining 50%
-                        closed = True
+                elif not timed_out and trade.status == 'TP1_HIT':
                     # Check BE (breakeven stop after TP1) - remaining 50% exits at 0
-                    elif is_long and current_low <= trade.entry_price:
+                    if is_long and current_low <= trade.entry_price:
                         trade.status = 'BE_HIT'
-                        pnl_pct = 0  # Remaining 50% exits at breakeven
                         closed = True
                     elif not is_long and current_high >= trade.entry_price:
                         trade.status = 'BE_HIT'
-                        pnl_pct = 0  # Remaining 50% exits at breakeven
+                        closed = True
+                    # Check TP2 - remaining 50% profit
+                    elif is_long and current_high >= trade.tp2_price:
+                        trade.status = 'TP2_HIT'
+                        closed = True
+                    elif not is_long and current_low <= trade.tp2_price:
+                        trade.status = 'TP2_HIT'
                         closed = True
 
                 if closed:
-                    trade.pnl_pct = pnl_pct
                     trade.closed_at = now_ms
 
+                    if is_long:
+                        sl_pct = (trade.sl_price - trade.entry_price) / trade.entry_price
+                        tp1_pct = (trade.tp1_price - trade.entry_price) / trade.entry_price
+                        tp2_pct = (trade.tp2_price - trade.entry_price) / trade.entry_price
+                    else:
+                        sl_pct = (trade.entry_price - trade.sl_price) / trade.entry_price
+                        tp1_pct = (trade.entry_price - trade.tp1_price) / trade.entry_price
+                        tp2_pct = (trade.entry_price - trade.tp2_price) / trade.entry_price
+
+                    if trade.status == 'SL_HIT':
+                        pnl_pct = sl_pct
+                    elif trade.status == 'BE_HIT':
+                        pnl_pct = 0.5 * tp1_pct
+                    elif trade.status == 'TP2_HIT':
+                        pnl_pct = 0.5 * tp1_pct + 0.5 * tp2_pct
+                    elif trade.status == 'TIMEOUT':
+                        pnl_pct = 0.5 * tp1_pct if trade.tp1_profit_taken else 0.0
+                    else:
+                        pnl_pct = 0.0
+
+                    trade.pnl_pct = pnl_pct
+
                     # Update capital for remaining position
+                    entry_capital = trade.entry_capital if trade.entry_capital > 0 else state.capital
                     sl_dist = abs(trade.entry_price - trade.sl_price) / trade.entry_price
                     leverage = min(RISK_PCT / sl_dist, MAX_LEVERAGE) if sl_dist > 0 else 1
-                    position = state.capital * leverage
-
-                    # Fee calculation: 1 fee if TP1 was hit (partial close already paid 1 fee), else 2 fees for full close
-                    fees = FEE_PCT if trade.tp1_profit_taken else FEE_PCT * 2
-                    pnl_dollar = position * pnl_pct - position * fees
+                    position = entry_capital * leverage
+                    fees = position * FEE_PCT * 2
+                    pnl_dollar = position * pnl_pct - fees
 
                     state.capital += pnl_dollar
                     state.capital = max(state.capital, 0)
                     state.total_pnl += pnl_dollar
 
-                    # Win/Loss counting: if TP1 was hit, it's a win regardless of final exit
-                    if trade.tp1_profit_taken:
-                        state.wins += 1  # TP1 hit = win (even if BE after)
-                    elif pnl_dollar > 0:
+                    if pnl_dollar > 0:
                         state.wins += 1
                     else:
                         state.losses += 1
@@ -815,7 +836,7 @@ class MLPaperTradingService:
 
                     win_rate = state.wins / (state.wins + state.losses) * 100 if (state.wins + state.losses) > 0 else 0
                     print(f"\n[{strategy_name}] Trade closed: {trade.status}")
-                    print(f"  Remaining PnL: {pnl_pct*100:+.2f}% (${pnl_dollar:+.2f})")
+                    print(f"  Trade PnL: {pnl_pct*100:+.2f}% (${pnl_dollar:+.2f})")
                     print(f"  Capital: ${state.capital:,.2f} | WR: {win_rate:.1f}% | MaxDD: {state.max_drawdown*100:.1f}%")
 
             for trade in trades_to_remove:

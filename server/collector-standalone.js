@@ -17,7 +17,9 @@ console.log('Symbols:', CONFIG.symbols.join(', '));
 console.log('='.repeat(50));
 
 // Start collector
-start();
+start().catch((err) => {
+    console.error('Collector failed to start:', err);
+});
 
 // Keep process alive
 process.on('uncaughtException', (err) => {

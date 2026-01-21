@@ -1,6 +1,6 @@
 /**
- * CryptoFlow VPS API Server
- * REST + WebSocket API for frontend access to stored data
+ * CryptoFlow API Server
+ * REST + WebSocket API for candle data access
  */
 
 const express = require('express');
@@ -11,13 +11,10 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const db = require('./db.js');
-// Collector runs separately - only import CONFIG for symbol info
 const { CONFIG } = require('./collector.js');
 
-// Configuration
-const PORT = process.env.PORT || 443;  // HTTPS port (also handles WSS)
+const PORT = process.env.PORT || 443;
 
-// SSL Certificates
 const SSL_KEY = path.join(__dirname, '..', 'ssl', 'key.pem');
 const SSL_CERT = path.join(__dirname, '..', 'ssl', 'cert.pem');
 
@@ -31,7 +28,6 @@ app.use(express.json());
 const distPath = path.join(__dirname, '..', 'dist');
 app.use(express.static(distPath));
 
-// Serve index.html for SPA routes
 app.get('/', (req, res) => {
     res.sendFile(path.join(distPath, 'index.html'));
 });
@@ -56,9 +52,8 @@ app.get('/api/health', (req, res) => {
 app.get('/api/symbols', (req, res) => {
     res.json({
         symbols: CONFIG.symbols.map(s => s.toUpperCase()),
-        tickSizes: CONFIG.tickSizes,
         exchanges: {
-            binance: CONFIG.exchanges?.binance?.symbols?.map(s => s.toUpperCase()) || CONFIG.symbols.map(s => s.toUpperCase()),
+            binance: CONFIG.exchanges?.binance?.symbols?.map(s => s.toUpperCase()) || [],
             bybit: CONFIG.exchanges?.bybit?.symbols?.map(s => s.toUpperCase()) || [],
             bitget: CONFIG.exchanges?.bitget?.symbols?.map(s => s.toUpperCase()) || []
         }
@@ -67,7 +62,7 @@ app.get('/api/symbols', (req, res) => {
 
 /**
  * Get candles for a symbol and timeframe
- * Query params: symbol, tf (1, 5, 15, 60), limit, exchange (binance/bybit)
+ * Query params: symbol, tf (1, 5, 15, 30, 60, 240, 1440), limit, exchange
  */
 app.get('/api/candles', (req, res) => {
     const baseSymbol = (req.query.symbol || 'btcusdt').toLowerCase();
@@ -75,7 +70,6 @@ app.get('/api/candles', (req, res) => {
     const tf = parseInt(req.query.tf || '1', 10);
     const limit = parseInt(req.query.limit || '1000', 10);
 
-    // Build full symbol with exchange prefix
     const fullSymbol = `${exchange}:${baseSymbol}`;
 
     const tableMap = {
@@ -101,126 +95,8 @@ app.get('/api/candles', (req, res) => {
     }
 });
 
-/**
- * Get raw trades
- * Query params: symbol, from (timestamp), to (timestamp), limit, exchange (binance/bybit/bitget)
- */
-app.get('/api/trades', (req, res) => {
-    const baseSymbol = (req.query.symbol || 'btcusdt').toLowerCase();
-    const exchange = (req.query.exchange || 'binance').toLowerCase();
-    const limit = parseInt(req.query.limit || '10000', 10);
-
-    const fullSymbol = `${exchange}:${baseSymbol}`;
-
-    try {
-        if (req.query.from && req.query.to) {
-            const trades = db.getTrades(fullSymbol, parseInt(req.query.from), parseInt(req.query.to));
-            res.json({ trades, exchange });
-        } else {
-            const trades = db.getLatestTrades(fullSymbol, Math.min(limit, 50000));
-            res.json({ trades, exchange });
-        }
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-/**
- * Get session markers (VWAP, POC, PVOC)
- */
-app.get('/api/session', (req, res) => {
-    const baseSymbol = (req.query.symbol || 'btcusdt').toLowerCase();
-    const exchange = (req.query.exchange || 'binance').toLowerCase();
-    const fullSymbol = `${exchange}:${baseSymbol}`;
-
-    try {
-        const previousSession = db.getPreviousSession(fullSymbol);
-
-        res.json({
-            previous: previousSession || null,
-            exchange
-        });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-/**
- * Get heatmap snapshots
- * Query params: symbol, since (timestamp), limit, exchange
- */
-app.get('/api/depth', (req, res) => {
-    const baseSymbol = (req.query.symbol || 'btcusdt').toLowerCase();
-    const exchange = (req.query.exchange || 'binance').toLowerCase();
-    const since = parseInt(req.query.since || '0', 10);
-    const limit = parseInt(req.query.limit || '1000', 10);
-    const step = parseInt(req.query.step || '1', 10);
-
-    const fullSymbol = `${exchange}:${baseSymbol}`;
-
-    try {
-        const snapshots = db.getSnapshots(fullSymbol, since, limit, step);
-        res.json({ snapshots, exchange });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-/**
- * Save heatmap snapshots (batch sync from client)
- */
-// Deprecated/Removed for Security: /api/depth/batch
-// Client does not upload data anymore. Server is autonomous.
-
-// ==================== ML PROXY ====================
-
-/**
- * Proxy requests to Python ML Service (Port 5001)
- * Frontend -> Node (443) -> Python (5001)
- */
-app.all('/api/ml/{*path}', async (req, res) => {
-    // SECURITY: Protect training endpoint
-    if (req.url.includes('/train')) {
-        const apiKey = req.headers['x-api-key'];
-        // Hardcoded key for "Public Alpha" simplicity. 
-        // In production, use process.env.ADMIN_KEY
-        if (apiKey !== 'CryptoFlowMasterKey2025!') {
-            return res.status(401).json({ error: 'Unauthorized: Admin Key Required for Training' });
-        }
-    }
-
-    const targetUrl = `http://127.0.0.1:5001${req.url}`;
-
-    try {
-        const options = {
-            method: req.method,
-            headers: { 'Content-Type': 'application/json' },
-        };
-
-        if (req.method !== 'GET' && req.method !== 'HEAD') {
-            options.body = JSON.stringify(req.body);
-        }
-
-        const response = await fetch(targetUrl, options);
-
-        if (!response.ok) {
-            return res.status(response.status).json({ error: `ML Service Error: ${response.statusText}` });
-        }
-
-        const data = await response.json();
-        res.json(data);
-    } catch (err) {
-        console.error('ML Proxy Error:', err.message);
-        res.status(502).json({
-            error: 'ML Service Unavailable',
-            details: 'The AI Brain is starting up... please wait.'
-        });
-    }
-});
-
 // ==================== WEBSOCKET SERVER ====================
 
-// Create HTTPS server with SSL certificates
 let server;
 try {
     const sslOptions = {
@@ -228,19 +104,17 @@ try {
         cert: fs.readFileSync(SSL_CERT)
     };
     server = https.createServer(sslOptions, app);
-    console.log('🔐 HTTPS mode enabled with SSL certificates');
+    console.log('HTTPS mode enabled');
 } catch (err) {
-    console.log('⚠️ SSL certificates not found, falling back to HTTP');
+    console.log('SSL not found, using HTTP');
     server = http.createServer(app);
 }
-// WebSocket server attached to HTTPS server (same port 443 for both HTTP and WS)
-const wss = new WebSocketServer({ server });
 
-// Track subscriptions
-const subscriptions = new Map(); // ws -> Set<symbol>
+const wss = new WebSocketServer({ server });
+const subscriptions = new Map();
 
 wss.on('connection', (ws) => {
-    console.log('🔌 Client connected');
+    console.log('Client connected');
     subscriptions.set(ws, new Set());
 
     ws.on('message', (data) => {
@@ -249,15 +123,18 @@ wss.on('connection', (ws) => {
 
             if (msg.type === 'subscribe') {
                 const symbol = msg.symbol?.toLowerCase();
+                const exchange = msg.exchange?.toLowerCase() || 'binance';
                 if (symbol && CONFIG.symbols.includes(symbol)) {
-                    subscriptions.get(ws).add(symbol);
-                    console.log(`📡 Client subscribed to ${symbol.toUpperCase()}`);
+                    const fullSymbol = `${exchange}:${symbol}`;
+                    subscriptions.get(ws).add(fullSymbol);
+                    console.log(`Subscribed: ${fullSymbol}`);
 
                     // Send initial candles
-                    const candles = db.getCandles('candles_1', symbol, 1000);
+                    const candles = db.getCandles('candles_1', fullSymbol, 1000);
                     ws.send(JSON.stringify({
                         type: 'history',
                         symbol: symbol.toUpperCase(),
+                        exchange,
                         candles
                     }));
                 }
@@ -265,17 +142,18 @@ wss.on('connection', (ws) => {
 
             if (msg.type === 'unsubscribe') {
                 const symbol = msg.symbol?.toLowerCase();
+                const exchange = msg.exchange?.toLowerCase() || 'binance';
                 if (symbol) {
-                    subscriptions.get(ws).delete(symbol);
+                    subscriptions.get(ws).delete(`${exchange}:${symbol}`);
                 }
             }
         } catch (err) {
-            console.error('Error processing WebSocket message:', err.message);
+            console.error('WebSocket error:', err.message);
         }
     });
 
     ws.on('close', () => {
-        console.log('🔌 Client disconnected');
+        console.log('Client disconnected');
         subscriptions.delete(ws);
     });
 
@@ -285,34 +163,17 @@ wss.on('connection', (ws) => {
 });
 
 /**
- * Broadcast trade to all subscribed clients
- */
-function broadcastTrade(symbol, trade) {
-    const msg = JSON.stringify({
-        type: 'trade',
-        symbol: symbol.toUpperCase(),
-        trade
-    });
-
-    for (const [ws, subs] of subscriptions) {
-        if (subs.has(symbol) && ws.readyState === WebSocket.OPEN) {
-            ws.send(msg);
-        }
-    }
-}
-
-/**
  * Broadcast candle update
  */
-function broadcastCandle(symbol, candle) {
+function broadcastCandle(fullSymbol, candle) {
     const msg = JSON.stringify({
         type: 'candle',
-        symbol: symbol.toUpperCase(),
+        symbol: fullSymbol,
         candle
     });
 
     for (const [ws, subs] of subscriptions) {
-        if (subs.has(symbol) && ws.readyState === WebSocket.OPEN) {
+        if (subs.has(fullSymbol) && ws.readyState === WebSocket.OPEN) {
             ws.send(msg);
         }
     }
@@ -321,20 +182,14 @@ function broadcastCandle(symbol, candle) {
 // ==================== STARTUP ====================
 
 function start() {
-    // Start HTTPS/HTTP server
     server.listen(PORT, () => {
         const protocol = PORT === 443 ? 'https' : 'http';
-        console.log(`🌐 REST API running on ${protocol}://localhost:${PORT}`);
-        console.log(`📡 WebSocket running on wss://localhost:${PORT}`);
+        console.log(`API running on ${protocol}://localhost:${PORT}`);
     });
-
-    // Note: Collector runs separately via pm2 (npm run start:collector)
-    console.log('💡 Collector should be started separately: npm run start:collector');
 }
 
-// Start if run directly
 if (require.main === module) {
     start();
 }
 
-module.exports = { app, server, broadcastTrade, broadcastCandle };
+module.exports = { app, server, broadcastCandle };
