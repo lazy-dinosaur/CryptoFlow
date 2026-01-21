@@ -24,9 +24,10 @@ db.pragma('wal_autocheckpoint = 1000');
 
 /**
  * Initialize database schema (candles only)
+ * Only 15m, 1h, 4h, 1d timeframes for trading
  */
 function initSchema() {
-    const timeframes = ['1', '5', '15', '30', '60', '240', '1440'];
+    const timeframes = ['15', '60', '240', '1440'];
 
     for (const tf of timeframes) {
         db.exec(`
@@ -117,7 +118,8 @@ function getLastCandleTime(tableName, symbol) {
  * Get database stats (candle counts)
  */
 function getStats() {
-    const timeframes = ['1', '5', '15', '30', '60', '240', '1440'];
+    // Only 15m, 1h, 4h, 1d timeframes for trading
+    const timeframes = ['15', '60', '240', '1440'];
     const stats = {};
     
     for (const tf of timeframes) {

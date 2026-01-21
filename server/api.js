@@ -62,21 +62,19 @@ app.get('/api/symbols', (req, res) => {
 
 /**
  * Get candles for a symbol and timeframe
- * Query params: symbol, tf (1, 5, 15, 30, 60, 240, 1440), limit, exchange
+ * Query params: symbol, tf (15, 60, 240, 1440), limit, exchange
  */
 app.get('/api/candles', (req, res) => {
     const baseSymbol = (req.query.symbol || 'btcusdt').toUpperCase();
     const exchange = (req.query.exchange || 'binance').toUpperCase();
-    const tf = parseInt(req.query.tf || '1', 10);
+    const tf = parseInt(req.query.tf || '15', 10);
     const limit = parseInt(req.query.limit || '1000', 10);
 
     const fullSymbol = `${exchange}:${baseSymbol}`;
 
+    // Only 15m, 1h, 4h, 1d timeframes for trading
     const tableMap = {
-        1: 'candles_1',
-        5: 'candles_5',
         15: 'candles_15',
-        30: 'candles_30',
         60: 'candles_60',
         240: 'candles_240',
         1440: 'candles_1440'
@@ -84,7 +82,7 @@ app.get('/api/candles', (req, res) => {
 
     const table = tableMap[tf];
     if (!table) {
-        return res.status(400).json({ error: 'Invalid timeframe. Use 1, 5, 15, 30, 60, 240, or 1440' });
+        return res.status(400).json({ error: 'Invalid timeframe. Use 15, 60, 240, or 1440' });
     }
 
     try {
@@ -129,8 +127,8 @@ wss.on('connection', (ws) => {
                     subscriptions.get(ws).add(fullSymbol);
                     console.log(`Subscribed: ${fullSymbol}`);
 
-                    // Send initial candles
-                    const candles = db.getCandles('candles_1', fullSymbol, 1000);
+                    // Send initial candles (15m timeframe)
+                    const candles = db.getCandles('candles_15', fullSymbol, 1000);
                     ws.send(JSON.stringify({
                         type: 'history',
                         symbol: symbol.toUpperCase(),

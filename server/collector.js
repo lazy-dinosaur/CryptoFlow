@@ -32,11 +32,9 @@ const CONFIG = {
     requestDelayMs: 200
 };
 
+// Only store timeframes needed for trading: 15m, 1h, 4h, 1d
 const TIMEFRAMES = [
-    { name: '1m', minutes: 1, table: 'candles_1', binance: '1m', bybit: '1', bitget: '1m' },
-    { name: '5m', minutes: 5, table: 'candles_5', binance: '5m', bybit: '5', bitget: '5m' },
     { name: '15m', minutes: 15, table: 'candles_15', binance: '15m', bybit: '15', bitget: '15m' },
-    { name: '30m', minutes: 30, table: 'candles_30', binance: '30m', bybit: '30', bitget: '30m' },
     { name: '1h', minutes: 60, table: 'candles_60', binance: '1h', bybit: '60', bitget: '1H' },
     { name: '4h', minutes: 240, table: 'candles_240', binance: '4h', bybit: '240', bitget: '4H' },
     { name: '1d', minutes: 1440, table: 'candles_1440', binance: '1d', bybit: 'D', bitget: '1D' }
