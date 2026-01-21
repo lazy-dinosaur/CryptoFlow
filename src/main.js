@@ -178,6 +178,11 @@ class CryptoFlowApp {
         this.mlDashboard = new MLDashboard('mlDashboard');
         this.mlDashboard.setFootprintChart(this.footprintChart); // Connect chart for channel testing
 
+        // Setup infinite scroll - load more history when user scrolls left
+        this.footprintChart.onNeedMoreHistory = async (oldestTime) => {
+            await this._loadMoreHistory(oldestTime);
+        };
+
         // FORCE TRUE for debugging (Verify if localstorage is the culprit)
         const isMLVisible = true;
 
@@ -693,11 +698,12 @@ class CryptoFlowApp {
             let vpsAvailable = false;
 
             try {
-                // Load ALL available candles (max 1500)
-                const candlesNeeded = 1500;
+                // Initial load - get recent candles first, then load more via pagination
+                const candlesNeeded = 2000;
 
                 try {
-                    const vpsCandles = await vpsAPI.getCandles(symbol, this.currentTimeframe, candlesNeeded);
+                    const result = await vpsAPI.getCandles(symbol, this.currentTimeframe, candlesNeeded);
+                    const vpsCandles = result.candles;
 
                     if (vpsCandles && vpsCandles.length > 0) {
                         this._updateLoadingText(`✅ ${exchangeName}: Importing ${vpsCandles.length} candles...`);
@@ -790,11 +796,12 @@ class CryptoFlowApp {
         this._updateLoadingText(`Loading ${minutes}m candles...`);
 
         try {
-            // Load ALL available candles (max 1500)
-            const candlesNeeded = 1500;
+            // Initial load - get recent candles, more will be loaded via pagination
+            const candlesNeeded = 2000;
 
             // Fetch candles for new timeframe from VPS
-            const vpsCandles = await vpsAPI.getCandles(this.currentSymbol, minutes, candlesNeeded);
+            const result = await vpsAPI.getCandles(this.currentSymbol, minutes, candlesNeeded);
+            const vpsCandles = result.candles;
 
             if (vpsCandles && vpsCandles.length > 0) {
                 this._updateLoadingText(`Importing ${vpsCandles.length} candles...`);
@@ -865,6 +872,46 @@ class CryptoFlowApp {
         // Update POC in footer
         if (volumeProfile.poc) {
             this.elements.pocValue.textContent = this._formatPrice(volumeProfile.poc);
+        }
+    }
+
+    /**
+     * Load more historical candles (infinite scroll pagination)
+     * @param {number} oldestTime - Timestamp of oldest currently loaded candle
+     */
+    async _loadMoreHistory(oldestTime) {
+        try {
+            console.log(`Loading more history before ${new Date(oldestTime).toISOString()}`);
+            
+            const result = await vpsAPI.loadMoreCandles(
+                this.currentSymbol,
+                this.currentTimeframe,
+                oldestTime,
+                2000,  // Load 2000 candles at a time
+                this.currentExchange
+            );
+
+            if (result.candles && result.candles.length > 0) {
+                // Prepend historical candles to dataAggregator
+                const added = dataAggregator.prependCandles(result.candles);
+                console.log(`Added ${added} historical candles`);
+
+                if (added > 0) {
+                    // Update chart with new data
+                    this._updateCharts();
+                }
+            }
+
+            // Signal that loading is complete
+            this.footprintChart.historyLoadComplete();
+
+            // If no more data, disable further loading
+            if (!result.hasMore) {
+                console.log('All historical data loaded');
+            }
+        } catch (err) {
+            console.error('Failed to load more history:', err);
+            this.footprintChart.historyLoadComplete();
         }
     }
 

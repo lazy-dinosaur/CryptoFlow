@@ -530,6 +530,97 @@ export class DataAggregator {
     }
 
     /**
+     * Prepend historical candles (for pagination - loading older data)
+     * @param {Array} candles - Array of older candle objects to prepend
+     * @returns {number} Number of candles added
+     */
+    prependCandles(candles) {
+        if (!candles || candles.length === 0) {
+            return 0;
+        }
+
+        // Get oldest existing candle time to avoid duplicates
+        const oldestExistingTime = this.candles.length > 0 ? this.candles[0].time : Infinity;
+        
+        // Filter out candles that already exist (by time)
+        const newCandles = candles.filter(c => c.time < oldestExistingTime);
+        
+        if (newCandles.length === 0) {
+            return 0;
+        }
+
+        // Process and prepend candles
+        const processedCandles = newCandles.map(c => {
+            // Parse clusters if they're a string (JSON)
+            let clusters = c.clusters;
+            if (typeof clusters === 'string') {
+                try {
+                    clusters = JSON.parse(clusters);
+                } catch {
+                    clusters = {};
+                }
+            }
+
+            // Convert clusters object to Map
+            const clusterMap = new Map();
+            if (clusters && typeof clusters === 'object') {
+                for (const [price, data] of Object.entries(clusters)) {
+                    clusterMap.set(parseFloat(price), data);
+                }
+            }
+
+            return {
+                time: c.time,
+                open: c.open,
+                high: c.high,
+                low: c.low,
+                close: c.close,
+                volume: c.volume || 0,
+                buyVolume: c.buyVolume || 0,
+                sellVolume: c.sellVolume || 0,
+                delta: c.delta || 0,
+                tradeCount: c.tradeCount || 0,
+                clusters: clusterMap
+            };
+        });
+
+        // Prepend to existing candles array
+        this.candles = [...processedCandles, ...this.candles];
+
+        // Update cumulative stats with new candles
+        for (const candle of processedCandles) {
+            this.totalBuyVolume += candle.buyVolume;
+            this.totalSellVolume += candle.sellVolume;
+            this.cumulativeDelta += candle.delta;
+            this.tradeCount += candle.tradeCount;
+
+            // Update volume profile
+            for (const [price, cluster] of candle.clusters) {
+                const existing = this.volumeProfile.get(price) || { buy: 0, sell: 0 };
+                existing.buy += (cluster.bid || 0);
+                existing.sell += (cluster.ask || 0);
+                this.volumeProfile.set(price, existing);
+            }
+        }
+
+        // Emit history update event
+        this._emit('historyPrepended', { count: processedCandles.length });
+        this._emit('statsUpdate', this.getStats());
+
+        return processedCandles.length;
+    }
+
+    /**
+     * Get the oldest candle timestamp
+     */
+    getOldestTime() {
+        if (this.candles.length > 0) {
+            return this.candles[0].time;
+        }
+        return null;
+    }
+
+    /**
      * Update candle without emitting events (for batch processing)
      */
     _updateCandleSilent(price, quantity, isBuy, rawPrice) {

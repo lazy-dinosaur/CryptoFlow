@@ -85,16 +85,40 @@ function upsertCandle(tableName, symbol, candle) {
 
 /**
  * Get candles for a symbol and timeframe
+ * @param {string} tableName - Table name (candles_15, candles_60, etc)
+ * @param {string} symbol - Symbol (BINANCE:BTCUSDT)
+ * @param {number} limit - Max candles to return
+ * @param {number|null} before - Get candles before this timestamp (for pagination)
  */
-function getCandles(tableName, symbol, limit = 100) {
-    return db.prepare(`
-        SELECT time, open, high, low, close, volume, buy_volume as buyVolume, 
-               sell_volume as sellVolume, delta, trade_count as tradeCount, clusters
-        FROM ${tableName}
-        WHERE symbol = ?
-        ORDER BY time DESC
-        LIMIT ?
-    `).all(symbol.toUpperCase(), limit).reverse().map(c => ({
+function getCandles(tableName, symbol, limit = 100, before = null) {
+    let query;
+    let params;
+    
+    if (before) {
+        // Pagination: get candles before the given timestamp
+        query = `
+            SELECT time, open, high, low, close, volume, buy_volume as buyVolume, 
+                   sell_volume as sellVolume, delta, trade_count as tradeCount, clusters
+            FROM ${tableName}
+            WHERE symbol = ? AND time < ?
+            ORDER BY time DESC
+            LIMIT ?
+        `;
+        params = [symbol.toUpperCase(), before, limit];
+    } else {
+        // Initial load: get most recent candles
+        query = `
+            SELECT time, open, high, low, close, volume, buy_volume as buyVolume, 
+                   sell_volume as sellVolume, delta, trade_count as tradeCount, clusters
+            FROM ${tableName}
+            WHERE symbol = ?
+            ORDER BY time DESC
+            LIMIT ?
+        `;
+        params = [symbol.toUpperCase(), limit];
+    }
+    
+    return db.prepare(query).all(...params).reverse().map(c => ({
         ...c,
         clusters: c.clusters ? JSON.parse(c.clusters) : {}
     }));

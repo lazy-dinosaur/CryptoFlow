@@ -62,13 +62,14 @@ app.get('/api/symbols', (req, res) => {
 
 /**
  * Get candles for a symbol and timeframe
- * Query params: symbol, tf (15, 60, 240, 1440), limit, exchange
+ * Query params: symbol, tf (15, 60, 240, 1440), limit, exchange, before (timestamp for pagination)
  */
 app.get('/api/candles', (req, res) => {
     const baseSymbol = (req.query.symbol || 'btcusdt').toUpperCase();
     const exchange = (req.query.exchange || 'binance').toUpperCase();
     const tf = parseInt(req.query.tf || '15', 10);
     const limit = parseInt(req.query.limit || '1000', 10);
+    const before = req.query.before ? parseInt(req.query.before, 10) : null;
 
     const fullSymbol = `${exchange}:${baseSymbol}`;
 
@@ -86,8 +87,10 @@ app.get('/api/candles', (req, res) => {
     }
 
     try {
-        const candles = db.getCandles(table, fullSymbol, Math.min(limit, 5000));
-        res.json({ candles, exchange, symbol: baseSymbol.toUpperCase() });
+        const candles = db.getCandles(table, fullSymbol, Math.min(limit, 5000), before);
+        // Return oldest timestamp for next pagination request
+        const oldestTime = candles.length > 0 ? candles[0].time : null;
+        res.json({ candles, exchange, symbol: baseSymbol.toUpperCase(), oldestTime, hasMore: candles.length === limit });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

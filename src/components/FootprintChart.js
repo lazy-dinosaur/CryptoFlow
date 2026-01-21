@@ -94,6 +94,11 @@ export class FootprintChart {
 
         this.mlPrediction = null; // { prediction: 'win', confidence: 0.85 }
 
+        // Pagination callback - called when user scrolls near oldest data
+        this.onNeedMoreHistory = null; // Set this to a function(oldestTime) to load more data
+        this._isLoadingHistory = false; // Prevent multiple simultaneous loads
+        this._loadHistoryThreshold = 50; // Load more when within 50 candles of start
+
         // PRO COLORS
         this.colors = {
             bg: '#0e1012',            // Slightly lighter dark for better contrast
@@ -356,6 +361,37 @@ export class FootprintChart {
         }
     }
 
+    /**
+     * Check if user has scrolled near the oldest data and needs more history
+     * Called after each render
+     */
+    _checkNeedMoreHistory() {
+        // Skip if no callback, already loading, or no candles
+        if (!this.onNeedMoreHistory || this._isLoadingHistory || !this.candles || this.candles.length === 0) {
+            return;
+        }
+
+        // Calculate visible candle range
+        const startIdx = Math.max(0, Math.floor(-this.offsetX / this.zoomX) - 1);
+        
+        // If viewing candles near the start, request more history
+        if (startIdx < this._loadHistoryThreshold) {
+            const oldestTime = this.candles[0]?.time;
+            if (oldestTime) {
+                this._isLoadingHistory = true;
+                // Call the callback - it should load more data and call prependCandles
+                this.onNeedMoreHistory(oldestTime);
+            }
+        }
+    }
+
+    /**
+     * Called after more history is loaded (to reset the loading flag)
+     */
+    historyLoadComplete() {
+        this._isLoadingHistory = false;
+    }
+
     toggleHeatmap() { this.showHeatmap = !this.showHeatmap; this.requestDraw(); return this.showHeatmap; }
     toggleBigTrades() { this.showBigTrades = !this.showBigTrades; this.requestDraw(); return this.showBigTrades; }
     toggleCrosshair() { this.showCrosshair = !this.showCrosshair; this.requestDraw(); return this.showCrosshair; }
@@ -443,6 +479,9 @@ export class FootprintChart {
                 this._drawWallAttack(ctx); // Existing HUD
                 this._drawTradePlan(ctx);  // NEW Trade Lines
             }
+
+            // Check if we need to load more historical data (infinite scroll)
+            this._checkNeedMoreHistory();
 
         } catch (e) {
             console.error('Chart Render Error:', e);

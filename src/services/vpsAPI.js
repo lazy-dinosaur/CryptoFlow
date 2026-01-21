@@ -76,19 +76,38 @@ export class VpsAPI {
 
     /**
      * Get historical candles
+     * @param {string} symbol - Trading pair symbol
+     * @param {number} timeframe - Timeframe in minutes (15, 60, 240, 1440)
+     * @param {number} limit - Max candles to fetch
+     * @param {string} exchange - Exchange name
+     * @param {number} before - Get candles before this timestamp (for pagination)
+     * @returns {Object} { candles, oldestTime, hasMore }
      */
-    async getCandles(symbol, timeframe = 1, limit = 100, exchange = null) {
+    async getCandles(symbol, timeframe = 15, limit = 2000, exchange = null, before = null) {
         const ex = exchange || this.currentExchange;
         try {
-            const response = await fetch(
-                `${this.baseUrl}/api/candles?symbol=${symbol}&tf=${timeframe}&limit=${limit}&exchange=${ex}`
-            );
+            let url = `${this.baseUrl}/api/candles?symbol=${symbol}&tf=${timeframe}&limit=${limit}&exchange=${ex}`;
+            if (before) {
+                url += `&before=${before}`;
+            }
+            const response = await fetch(url);
             const data = await response.json();
-            return data.candles || [];
+            return {
+                candles: data.candles || [],
+                oldestTime: data.oldestTime,
+                hasMore: data.hasMore || false
+            };
         } catch (err) {
             console.error('Failed to fetch candles from VPS:', err.message);
-            return [];
+            return { candles: [], oldestTime: null, hasMore: false };
         }
+    }
+
+    /**
+     * Load more historical candles (pagination)
+     */
+    async loadMoreCandles(symbol, timeframe, beforeTime, limit = 2000, exchange = null) {
+        return this.getCandles(symbol, timeframe, limit, exchange, beforeTime);
     }
 
     /**
