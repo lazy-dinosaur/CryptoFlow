@@ -65,8 +65,8 @@ app.get('/api/symbols', (req, res) => {
  * Query params: symbol, tf (1, 5, 15, 30, 60, 240, 1440), limit, exchange
  */
 app.get('/api/candles', (req, res) => {
-    const baseSymbol = (req.query.symbol || 'btcusdt').toLowerCase();
-    const exchange = (req.query.exchange || 'binance').toLowerCase();
+    const baseSymbol = (req.query.symbol || 'btcusdt').toUpperCase();
+    const exchange = (req.query.exchange || 'binance').toUpperCase();
     const tf = parseInt(req.query.tf || '1', 10);
     const limit = parseInt(req.query.limit || '1000', 10);
 
