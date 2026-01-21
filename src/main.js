@@ -21,7 +21,7 @@ class CryptoFlowApp {
     constructor() {
         // State
         this.currentSymbol = 'btcusdt';
-        this.currentTimeframe = 1; // minutes
+        this.currentTimeframe = 15; // minutes (15m, 60m, 240m, 1440m available)
         this.currentPrice = null;
         this.priceChangePercent = 0;
         this.isLoadingHistory = false;
@@ -732,11 +732,12 @@ class CryptoFlowApp {
             if (!vpsAvailable) {
                 this._updateLoadingText('Fetching historical trades from Binance...');
 
-                // Scale history based on timeframe (e.g. 1h needs more history than 1m)
+                // Scale history based on timeframe
                 let minutesToLoad = this.historyMinutes;
-                if (this.currentTimeframe === 5) minutesToLoad = 60;
                 if (this.currentTimeframe === 15) minutesToLoad = 120;
-                if (this.currentTimeframe === 60) minutesToLoad = 240; // 4 hours
+                if (this.currentTimeframe === 60) minutesToLoad = 240;
+                if (this.currentTimeframe === 240) minutesToLoad = 480;
+                if (this.currentTimeframe === 1440) minutesToLoad = 1440;
 
                 const trades = await fetchTradesForPeriod(
                     symbol.toUpperCase(),
@@ -820,11 +821,11 @@ class CryptoFlowApp {
             // FALLBACK: Load from Binance Raw Trades
             this._updateLoadingText(`VPS Failed. Fetching raw trades...`);
 
-            // Calculate history needed
-            let historyMins = 10;
-            if (minutes === 5) historyMins = 60;
-            if (minutes === 15) historyMins = 120;
-            if (minutes === 60) historyMins = 240; // 4h
+            // Calculate history needed (fallback for when VPS fails)
+            let historyMins = 120; // Default for 15m
+            if (minutes === 60) historyMins = 240;
+            if (minutes === 240) historyMins = 480;
+            if (minutes === 1440) historyMins = 1440;
 
             try {
                 const trades = await fetchTradesForPeriod(
@@ -897,6 +898,11 @@ class CryptoFlowApp {
                 console.log(`Added ${added} historical candles`);
 
                 if (added > 0) {
+                    // Adjust chart offset to maintain current view position
+                    // When we prepend N candles, old index 0 becomes index N
+                    // So we need to shift offsetX left by N * zoomX
+                    this.footprintChart.offsetX -= added * this.footprintChart.zoomX;
+                    
                     // Update chart with new data
                     this._updateCharts();
                 }
