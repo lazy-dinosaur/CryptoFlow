@@ -12,18 +12,22 @@ const CONFIG = {
     exchanges: {
         binance: {
             enabled: true,
-            symbols: ['btcusdt', 'ethusdt', 'solusdt', 'bnbusdt']
+            symbols: ['btcusdt', 'ethusdt', 'solusdt', 'bnbusdt'],
+            historyDays: 730  // 2 years
         },
         bybit: {
             enabled: true,
-            symbols: ['btcusdt', 'ethusdt', 'solusdt']
+            symbols: ['btcusdt', 'ethusdt', 'solusdt'],
+            historyDays: 730  // 2 years
         },
         bitget: {
             enabled: true,
-            symbols: ['btcusdt', 'ethusdt', 'solusdt']
+            symbols: ['btcusdt', 'ethusdt', 'solusdt'],
+            historyDays: 90,  // Bitget has limited history for small timeframes
+            // 1m/5m/15m/30m/1h: ~30-60 days max, 4h/1d: 90+ days
         }
     },
-    historyDays: 90,
+    historyDays: 730,  // Default: 2 years
     pollIntervalMs: 60 * 1000,
     requestDelayMs: 200
 };
@@ -187,7 +191,10 @@ async function backfillCandles(exchange, symbol, timeframe) {
     const tfMs = timeframe.minutes * 60 * 1000;
     const now = Date.now();
     const endTime = Math.floor((now - tfMs) / tfMs) * tfMs;
-    const cutoffTime = now - CONFIG.historyDays * 24 * 60 * 60 * 1000;
+    // Use exchange-specific history days if available
+    const exchangeConfig = CONFIG.exchanges[exchange];
+    const historyDays = exchangeConfig?.historyDays || CONFIG.historyDays;
+    const cutoffTime = now - historyDays * 24 * 60 * 60 * 1000;
     const lastTime = getLastCandleTime(timeframe.table, fullSymbol);
     let startTime = cutoffTime;
 
@@ -279,12 +286,13 @@ async function syncLatestCandles() {
 
 async function backfillAll() {
     console.log(`\n========================================`);
-    console.log(`  Backfill: last ${CONFIG.historyDays} days`);
+    console.log(`  Backfill History`);
     console.log(`========================================\n`);
     
     for (const [exchange, exchangeConfig] of Object.entries(CONFIG.exchanges)) {
         if (!exchangeConfig.enabled) continue;
-        console.log(`[${exchange.toUpperCase()}] ${exchangeConfig.symbols.join(', ')}`);
+        const days = exchangeConfig.historyDays || CONFIG.historyDays;
+        console.log(`[${exchange.toUpperCase()}] ${exchangeConfig.symbols.join(', ')} (${days} days)`);
         
         for (const symbol of exchangeConfig.symbols) {
             for (const timeframe of TIMEFRAMES) {
