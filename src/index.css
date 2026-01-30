@@ -355,39 +355,18 @@ body {
 
 .chart-container {
   flex: 1;
-  display: flex;
+  display: block;
   overflow: hidden;
   position: relative;
-}
-
-.volume-profile-container {
-  width: 80px;
-  background: var(--bg-tertiary);
-  border-right: 1px solid var(--border-color);
-  position: relative;
-}
-
-.volume-profile-container canvas {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
 }
 
 .footprint-container {
   flex: 1;
   position: relative;
   overflow: hidden;
-}
-
-.footprint-container canvas {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
   height: 100%;
 }
+
 
 .chart-legend {
   display: flex;
@@ -438,71 +417,6 @@ body {
   margin-left: auto;
   color: var(--text-muted);
   font-size: 0.7rem;
-}
-
-.tick-selector {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-right: 8px;
-}
-
-.tick-selector label {
-  font-size: 0.75rem;
-  color: var(--text-muted);
-}
-
-.tick-selector select {
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border-light);
-  border-radius: var(--radius-sm);
-  color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: 0.8rem;
-  padding: 4px 8px;
-  cursor: pointer;
-}
-
-/* Whale Threshold Slider */
-.whale-slider-container {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 8px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border-light);
-  border-radius: var(--radius-sm);
-}
-
-.whale-slider-container input[type="range"] {
-  width: 60px;
-  height: 4px;
-  background: var(--bg-hover);
-  border-radius: 2px;
-  -webkit-appearance: none;
-  appearance: none;
-  cursor: pointer;
-}
-
-.whale-slider-container input[type="range"].wide-slider {
-  width: 120px;
-}
-
-.whale-slider-container input[type="range"]::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  width: 12px;
-  height: 12px;
-  background: var(--accent-primary);
-  border-radius: 50%;
-  cursor: pointer;
-}
-
-.whale-slider-container .slider-value {
-  font-family: var(--font-mono);
-  font-size: 0.75rem;
-  color: var(--text-secondary);
-  min-width: 24px;
-  text-align: center;
 }
 
 /* ========================================

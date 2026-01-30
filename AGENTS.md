@@ -1,38 +1,138 @@
-# Repository Guidelines
+# PROJECT KNOWLEDGE BASE
 
-## Project Structure & Module Organization
-- `src/` contains the frontend Vite app (Canvas chart engine, UI components, services, and utilities).
-- `server/` hosts the Node/Express API, collectors, and ML service scripts; SQLite data lives under `server/data/`.
-- `backtest/` contains Python backtesting/analysis scripts, datasets, and outputs (`backtest/data/`, `backtest/results/`).
-- `docs/`, `research/`, and `pinescripts/` hold supplemental documentation and experiments.
-- `dist/` is the build output; treat it as generated.
+**Generated:** 2026-01-30
+**Commit:** 9aad141
+**Branch:** main
 
-## Build, Test, and Development Commands
-- `npm install` installs frontend dependencies.
-- `npm run dev` starts the Vite dev server at `http://localhost:5173`.
-- `npm run build` builds the frontend into `dist/`.
-- `npm run preview` serves the production build locally.
-- `npm --prefix server install` installs server dependencies.
-- `npm --prefix server run start` or `node server/api.js` starts the API server (default port 5001).
-- `npm --prefix server run start:collector` runs the standalone market data collector.
-- `python3 server/ml_service.py` runs the ML service when needed.
+## OVERVIEW
 
-## Coding Style & Naming Conventions
-- JavaScript uses ES modules, 4-space indentation, and semicolons; keep imports organized by feature area.
-- Component files in `src/components/` are PascalCase (e.g., `FootprintChart.js`); service modules in `src/services/` use camelCase filenames.
-- Python scripts use snake_case filenames and functions.
+CryptoFlow: Institutional-grade crypto charting with Bookmap-style footprint/heatmap visualization. Vanilla JS Canvas frontend + Node/Express API + Python ML backtesting.
 
-## Testing Guidelines
-- There is no formal unit test runner in this repo.
-- Backtesting and validation live in `backtest/` with scripts named `test_*.py` or `ml_test_*.py`.
-- Run targeted scripts directly, e.g., `python backtest/run_backtest.py`, and review outputs in `backtest/results/`.
+## STRUCTURE
 
-## Commit & Pull Request Guidelines
-- Follow Conventional Commits as seen in history: `feat: ...`, `fix: ...`, `docs: ...`.
-- PRs should include a clear description, reproducible steps, and screenshots for UI changes.
-- Call out data/schema changes (e.g., `server/data/cryptoflow.db`) and any migration or re-seed steps.
+```
+CryptoFlow/
+├── src/                    # Vite frontend (Canvas chart engine)
+│   ├── components/         # UI: FootprintChart, MLDashboard, chart/layers
+│   ├── services/           # Data: binanceWS, dataAggregator, vpsAPI
+│   └── main.js             # App entry (CryptoFlowApp class)
+├── server/                 # Node/Express backend
+│   ├── api.js              # REST + WebSocket server (port 3000)
+│   ├── collector.js        # Multi-exchange candle collector
+│   ├── db.js               # SQLite schema/queries
+│   └── ml_paper_trading.py # Python paper trading (port 5003)
+├── backtest/               # Python ML/strategy experiments
+│   ├── engine.py           # Backtesting framework
+│   ├── strategies/         # Pluggable strategy classes
+│   └── ml_*.py             # 40+ ML experiment scripts
+└── server/data/            # SQLite databases
+```
 
-## Security & Configuration Tips
-- Avoid committing credentials or API keys; use local environment configuration.
-- The SQLite DB is stored at `server/data/cryptoflow.db`; back it up before destructive changes.
-- `ecosystem.config.cjs` and `setup-*` scripts are used for VPS/Windows setup; update them when deployment steps change.
+## WHERE TO LOOK
+
+| Task | Location | Notes |
+|------|----------|-------|
+| Chart rendering | `src/components/chart/` | Layered Canvas architecture |
+| Trade aggregation | `src/services/dataAggregator.js` | OHLCV, footprint, delta |
+| Real-time data | `src/services/binanceWS.js` | WebSocket streams |
+| API endpoints | `server/api.js` | `/api/candles`, `/api/symbols` |
+| Database schema | `server/db.js` | candles_15/60/240/1440 tables |
+| Paper trading signals | `server/ml_paper_trading.py` | Channel detection, bounce/fakeout |
+| Strategy backtesting | `backtest/engine.py` | Trade, BacktestResult classes |
+| Baseline strategy | `backtest/ml_channel_tiebreaker_proper.py` | Reference implementation |
+
+## CODE MAP
+
+| Symbol | Type | Location | Role |
+|--------|------|----------|------|
+| CryptoFlowApp | class | src/main.js | App orchestrator |
+| DataAggregator | class | src/services/dataAggregator.js | Trade→Candle aggregation |
+| BinanceWS | class | src/services/binanceWS.js | WebSocket client |
+| VpsAPI | class | src/services/vpsAPI.js | Backend client |
+| FootprintChart | class | src/components/FootprintChart.js | Chart wrapper |
+| MLDashboard | class | src/components/MLDashboard.js | Paper trading UI |
+| RenderEngine | class | src/components/chart/core/RenderEngine.js | Canvas renderer |
+| ChartState | class | src/components/chart/core/ChartState.js | State management |
+
+## DATA FLOW
+
+```
+Exchanges (Binance/Bybit/Bitget)
+    ↓ REST Kline API (60s polling)
+collector.js → db.js (SQLite) → api.js → Frontend
+    ↓ WebSocket (real-time)
+binanceWS.js → dataAggregator.js → FootprintChart.js
+```
+
+## CONVENTIONS
+
+| Context | Rule |
+|---------|------|
+| JS modules | ES Modules, 4-space indent, semicolons |
+| Component files | PascalCase (`FootprintChart.js`) |
+| Service files | camelCase (`dataAggregator.js`) |
+| Python files | snake_case (`ml_channel.py`) |
+| Private methods | Underscore prefix (`_init()`) |
+| Commits | Conventional: `feat:`, `fix:`, `docs:` |
+
+## ANTI-PATTERNS (THIS PROJECT)
+
+### CRITICAL: Lookahead Bias
+```python
+# CORRECT - Use previous completed candle
+channel = htf_channel_map.get(htf_idx - 1)
+
+# WRONG - Uses incomplete/future data
+channel = htf_channel_map.get(htf_idx)
+```
+Affects all `backtest/ml_*.py` and `server/ml_paper_trading.py`.
+
+### Array Mutation
+```javascript
+// WARNING: reverse() mutates original array
+sortedAsks.reverse()  // src/components/OrderBook.js
+```
+
+### Loading Overlay
+```javascript
+// ALWAYS hide even on error to prevent UI lockup
+this.elements.loadingOverlay.classList.add('hidden');
+```
+
+### Disabled Features (Validated Decisions)
+| Feature | Status | Reason |
+|---------|--------|--------|
+| ML Filtering | DISABLED | Reduces total profit |
+| FAKEOUT Strategy | DISABLED | -0.10% avg PnL after bias fix |
+
+## UNIQUE STYLES
+
+- **No linter/formatter** - Style enforced by convention only
+- **Pure JavaScript** - No TypeScript despite Vite
+- **Mixed module systems** - Frontend ESM, server CommonJS
+- **No test framework** - Validation via backtest scripts
+
+## COMMANDS
+
+```bash
+# Frontend
+npm install && npm run dev        # Dev server :5173
+npm run build                     # Build to dist/
+
+# Server
+npm --prefix server install
+npm --prefix server run start     # API :3000
+npm --prefix server run start:collector
+
+# Python
+python3 server/ml_paper_trading.py    # Paper trading :5003
+python backtest/run_backtest.py       # Run backtest
+```
+
+## NOTES
+
+- **DB Backup**: Always backup `server/data/cryptoflow.db` before destructive changes
+- **Port Config**: API=3000, ML Paper=5003, Vite Dev=5173
+- **Coordinate Alignment**: `CoordinateSystem.js` may not match `FootprintChart.js` - test both when changing
+- **Heatmap Index**: Assumes 1:1 candle-to-snapshot mapping - breaks if data misaligned
+- **Sample Size**: ML models unreliable with <10 training samples

@@ -7,12 +7,9 @@ import { binanceWS } from './services/binanceWS.js';
 import { dataAggregator } from './services/dataAggregator.js';
 import { fetchTradesForPeriod } from './services/binanceREST.js';
 import { settingsManager } from './services/settingsManager.js';
-import { audioService } from './services/audioService.js';
 import { sessionManager } from './services/sessionManager.js';
-import { depthHeatmap } from './services/depthHeatmap.js';
 import { vpsAPI } from './services/vpsAPI.js';
 import { FootprintChart } from './components/FootprintChart.js';
-import { VolumeProfile } from './components/VolumeProfile.js';
 import { OrderBook } from './components/OrderBook.js';
 import { MLDashboard } from './components/MLDashboard.js';
 
@@ -28,7 +25,6 @@ class CryptoFlowApp {
 
         // Components
         this.footprintChart = null;
-        this.volumeProfile = null;
         this.orderBook = null;
 
         // Current exchange
@@ -41,13 +37,6 @@ class CryptoFlowApp {
             connectionStatus: document.getElementById('connectionStatus'),
             priceDisplay: document.getElementById('priceDisplay'),
             timeframeBtns: document.querySelectorAll('.tf-btn'),
-            toggleDelta: document.getElementById('toggleDelta'),
-            toggleImbalances: document.getElementById('toggleImbalances'),
-            toggleCrosshair: document.getElementById('toggleCrosshair'),
-            toggleHeatmap: document.getElementById('toggleHeatmap'),
-            toggleBigTrades: document.getElementById('toggleBigTrades'),
-            toggleSound: document.getElementById('toggleSound'), // NEW
-            tickSizeSelect: document.getElementById('tickSizeSelect'),
             volume24h: document.getElementById('volume24h'),
             cvdValue: document.getElementById('cvdValue'),
             deltaValue: document.getElementById('deltaValue'),
@@ -66,14 +55,6 @@ class CryptoFlowApp {
             ethusdt: 1,
             solusdt: 0.1,
             bnbusdt: 0.1
-        };
-
-        // Big trade thresholds (whale markers)
-        this.bigTradeThresholds = {
-            btcusdt: 20.0,   // 20 BTC = whale (User Default)
-            ethusdt: 50.0,   // 50 ETH = whale
-            solusdt: 500.0,  // 500 SOL = whale
-            bnbusdt: 100.0   // 100 BNB = whale
         };
 
         // Historical data settings
@@ -108,58 +89,12 @@ class CryptoFlowApp {
      * Initialize UI components
      */
     _initComponents() {
-        // Footprint Chart
-        // Footprint Chart
+        // Chart
         this.footprintChart = new FootprintChart({
             containerId: 'footprintContainer',
             width: window.innerWidth - 320, // Subtract sidebar width
             height: window.innerHeight
         });
-
-        this.depthHeatmap = depthHeatmap;
-
-        // Apply saved tick size
-        const savedTickSize = settingsManager.getTickSize(this.currentSymbol) || this.tickSizes[this.currentSymbol];
-        this.footprintChart.setTickSize(savedTickSize);
-
-        // Apply default heatmap settings
-        this.footprintChart.setHeatmapIntensityThreshold(0.05);
-        this.footprintChart.setHeatmapHistoryPercent(60);
-
-        // Apply saved zoom
-        const savedZoom = settingsManager.get('zoomLevel');
-        if (savedZoom) this.footprintChart.setZoom(savedZoom);
-
-        // Update settings when zoom changes
-        this.footprintChart.onZoomChange = (level) => {
-            settingsManager.set('zoomLevel', level);
-        };
-
-        // Apply toggles from settings
-        // Apply toggles from settings (Checkboxes)
-        const showDelta = settingsManager.get('showDelta') !== false;
-        this.footprintChart.showDelta = showDelta;
-        if (this.elements.toggleDelta) this.elements.toggleDelta.checked = showDelta;
-
-        const showImbalances = settingsManager.get('showImbalances') !== false;
-        this.footprintChart.showImbalances = showImbalances;
-        if (this.elements.toggleImbalances) this.elements.toggleImbalances.checked = showImbalances;
-
-        const showHeatmap = settingsManager.get('showHeatmap') === true;
-        this.footprintChart.showHeatmap = showHeatmap;
-        if (this.elements.toggleHeatmap) this.elements.toggleHeatmap.checked = showHeatmap;
-
-        const showBigTrades = settingsManager.get('showBigTrades') !== false;
-        this.footprintChart.showBigTrades = showBigTrades;
-        if (this.elements.toggleBigTrades) this.elements.toggleBigTrades.checked = showBigTrades;
-
-        // Sound State
-        const soundEnabled = settingsManager.get('soundEnabled') !== false; // Default true
-        audioService.setEnabled(soundEnabled);
-        if (this.elements.toggleSound) this.elements.toggleSound.checked = soundEnabled;
-
-        // Volume Profile
-        this.volumeProfile = new VolumeProfile('volumeProfileContainer', 'volumeProfileCanvas');
 
         // Order Book
         this.orderBook = new OrderBook({
@@ -174,7 +109,7 @@ class CryptoFlowApp {
             largeOrderThreshold: 5
         });
 
-        // ML Dashboard
+        // Paper Trading Dashboard
         this.mlDashboard = new MLDashboard('mlDashboard');
         this.mlDashboard.setFootprintChart(this.footprintChart); // Connect chart for channel testing
 
@@ -183,47 +118,12 @@ class CryptoFlowApp {
             await this._loadMoreHistory(oldestTime);
         };
 
-        // FORCE TRUE for debugging (Verify if localstorage is the culprit)
-        const isMLVisible = true;
-
-        this.mlDashboard.setVisible(true);
-        this.footprintChart.showML = true;
-
-        if (this.elements.toggleML) this.elements.toggleML.checked = true;
-
-        this.mlDashboard.setVisible(isMLVisible);
-        if (this.elements.toggleML) this.elements.toggleML.checked = isMLVisible;
-
-        // Setup ML Prediction Loop (Throttled 2s)
-        this.lastPredictionTime = 0;
-        dataAggregator.on('candleUpdate', async () => {
-            if (!this.mlDashboard.isVisible) return; // Only predict if visible
-
-            const now = Date.now();
-            if (now - this.lastPredictionTime < 2000) return; // Throttle
-            this.lastPredictionTime = now;
-
-            // Get last 20 candles for context
-            const candles = dataAggregator.getCandles().slice(-20);
-            if (!candles || candles.length < 10) return;
-
-            const result = await this.mlDashboard.predictFromCandles(candles);
-            if (result && result.prediction) {
-                // Update Chart or UI
-                if (this.footprintChart) {
-                    this.footprintChart.setMLPrediction(result);
-                    // Also update dashboard UI if needed
-                    this.mlDashboard.updatePredictionUI(result);
-                }
-            }
-        });
-
         // Setup Channel Fetching from Paper Trading API
         this._startChannelPolling();
     }
 
     /**
-     * Start polling for ML channel data
+     * Start polling for paper trading channel data
      */
     _startChannelPolling() {
         const isLocalHost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
@@ -293,203 +193,16 @@ class CryptoFlowApp {
             });
         });
 
-        // --- NEW CHECKBOX HANDLERS ---
-
-        // Delta
-        if (this.elements.toggleDelta) {
-            // Set initial state
-            this.elements.toggleDelta.checked = this.footprintChart.showDelta;
-            this.elements.toggleDelta.addEventListener('change', (e) => {
-                const active = e.target.checked;
-                this.footprintChart.showDelta = active;
-                settingsManager.set('showDelta', active);
-                this.footprintChart.requestDraw();
-            });
-        }
-
-        // Imbalances
-        if (this.elements.toggleImbalances) {
-            this.elements.toggleImbalances.checked = this.footprintChart.showImbalances;
-            this.elements.toggleImbalances.addEventListener('change', (e) => {
-                const active = e.target.checked;
-                this.footprintChart.showImbalances = active;
-                settingsManager.set('showImbalances', active);
-                this.footprintChart.requestDraw();
-            });
-        }
-
-        // CVD
-        const toggleCVD = document.getElementById('toggleCVD');
-        if (toggleCVD) {
-            toggleCVD.checked = this.footprintChart.showCVD !== false;
-            toggleCVD.addEventListener('change', (e) => {
-                const active = e.target.checked;
-                this.footprintChart.showCVD = active;
-                settingsManager.set('showCVD', active);
-                this.footprintChart.requestDraw();
-            });
-        }
-
-        // Heatmap
-        if (this.elements.toggleHeatmap) {
-            this.elements.toggleHeatmap.checked = this.footprintChart.showHeatmap;
-            this.elements.toggleHeatmap.addEventListener('change', (e) => {
-                const active = e.target.checked;
-                this.footprintChart.showHeatmap = active;
-                settingsManager.set('showHeatmap', active);
-                this.footprintChart.requestDraw();
-            });
-        }
-
-        // Big Trades
-        if (this.elements.toggleBigTrades) {
-            this.elements.toggleBigTrades.checked = this.footprintChart.showBigTrades;
-            this.elements.toggleBigTrades.addEventListener('change', (e) => {
-                const active = e.target.checked;
-                this.footprintChart.showBigTrades = active;
-                settingsManager.set('showBigTrades', active);
-                this.footprintChart.requestDraw();
-            });
-        }
-
-        // Sound
-        if (this.elements.toggleSound) {
-            this.elements.toggleSound.checked = audioService.enabled;
-            this.elements.toggleSound.addEventListener('change', (e) => {
-                const enabled = e.target.checked;
-                audioService.setEnabled(enabled);
-                settingsManager.set('soundEnabled', enabled);
-            });
-        }
-
-
-
-        // Listen for 'M' key event from chart
-        window.addEventListener('toggle-ml-dashboard', () => {
-            const btn = this.elements.toggleML;
-            if (btn) {
-                // Simulate click
-                this.elements.toggleML.click(); // Logic not yet implemented for click? Check if toggleML logic exists
-                // Wait, we haven't implemented toggleML listener loop yet in main.js view? 
-                // Looking at file, I see toggleBigTrades at 212. I need to add toggleML logic.
-            }
-        });
-
-        // Toggle ML Dashboard Button logic
-        // Toggle ML Dashboard (Checkbox)
-        // Toggle ML Dashboard (Checkbox)
         if (this.elements.toggleML) {
+            const initial = settingsManager.get('showML') !== false;
+            this.elements.toggleML.checked = initial;
+            this.mlDashboard.setVisible(initial);
             this.elements.toggleML.addEventListener('change', (e) => {
                 const active = e.target.checked;
                 this.mlDashboard.setVisible(active);
                 settingsManager.set('showML', active);
-
-                // Also update chart flag if needed (though dashboard is overlay)
-                this.footprintChart.showML = active;
-                this.footprintChart.requestDraw();
             });
         }
-
-        // Bubble Size Slider (New)
-        const bubbleSizeSlider = document.getElementById('bubbleSizeSlider');
-        const bubbleSizeValue = document.getElementById('bubbleSizeValue');
-        if (bubbleSizeSlider) {
-            const savedScale = settingsManager.get('bigTradeScale') || 1.0;
-            bubbleSizeSlider.value = savedScale;
-            bubbleSizeValue.textContent = savedScale + 'x';
-            this.footprintChart.bigTradeScale = savedScale;
-
-            bubbleSizeSlider.addEventListener('input', (e) => {
-                const val = parseFloat(e.target.value);
-                bubbleSizeValue.textContent = val.toFixed(1) + 'x';
-                this.footprintChart.bigTradeScale = val;
-                this.footprintChart.requestDraw();
-                settingsManager.set('bigTradeScale', val);
-            });
-        }
-
-
-        // Whale threshold slider
-        const whaleSlider = document.getElementById('whaleThresholdSlider');
-        const whaleValue = document.getElementById('whaleThresholdValue');
-        if (whaleSlider && whaleValue) {
-            // Initialize from persisted settings or Default 1.0
-            const persisted = settingsManager.getBigTradeThreshold(this.currentSymbol);
-            const val = (typeof persisted === 'number') ? persisted : 1.0;
-
-            whaleSlider.value = String(val);
-            whaleValue.textContent = String(val);
-            this.footprintChart.setBigTradeThreshold(val);
-
-            // Heatmap intensity slider
-            const heatmapSlider = document.getElementById('heatmapIntensitySlider');
-            const heatmapValue = document.getElementById('heatmapIntensityValue');
-            if (heatmapSlider && heatmapValue) {
-                // Initialize from persisted settings or Default 0.05
-                const persistedIntensity = settingsManager.getHeatmapIntensityThreshold();
-                const intensityVal = (typeof persistedIntensity === 'number') ? persistedIntensity : 0.05;
-
-                heatmapSlider.value = String(intensityVal);
-                heatmapValue.textContent = Math.round(intensityVal * 100) + '%';
-                this.footprintChart.setHeatmapIntensityThreshold(intensityVal);
-
-                heatmapSlider.addEventListener('input', (e) => {
-                    const val = parseFloat(e.target.value);
-                    heatmapValue.textContent = Math.round(val * 100) + '%';
-                    this.footprintChart.setHeatmapIntensityThreshold(val);
-                    settingsManager.setHeatmapIntensityThreshold(val);
-                });
-            }
-
-            // Heatmap history slider
-            const historySlider = document.getElementById('heatmapHistorySlider');
-            const historyValue = document.getElementById('heatmapHistoryValue');
-            if (historySlider && historyValue) {
-                historySlider.addEventListener('input', (e) => {
-                    const val = parseInt(e.target.value, 10);
-                    historyValue.textContent = val + '%';
-                    this.footprintChart.setHeatmapHistoryPercent(val);
-                    settingsManager.setHeatmapHistoryPercent(val);
-                });
-            }
-
-            whaleSlider.addEventListener('input', (e) => {
-                const val = parseFloat(e.target.value);
-                whaleValue.textContent = val.toFixed(1);
-                this.footprintChart.setBigTradeThreshold(val);
-                settingsManager.setBigTradeThreshold(this.currentSymbol, val);
-            });
-        }
-        // Auto Filter Toggle
-        const toggleAutoFilter = document.getElementById('toggleAutoFilter');
-        if (toggleAutoFilter) {
-            toggleAutoFilter.addEventListener('click', () => {
-                this.footprintChart.autoFilter = !this.footprintChart.autoFilter;
-                toggleAutoFilter.classList.toggle('active', this.footprintChart.autoFilter);
-
-                if (this.footprintChart.autoFilter) {
-                    const next = this.footprintChart._calculateDynamicThreshold(0.99);
-
-                    // Sync UI
-                    const whaleSliderEl = document.getElementById('whaleThresholdSlider');
-                    const whaleValueEl = document.getElementById('whaleThresholdValue');
-                    if (whaleSliderEl) whaleSliderEl.value = String(next.toFixed(1));
-                    if (whaleValueEl) whaleValueEl.textContent = String(next.toFixed(1));
-                }
-            });
-        }
-
-        // Tick size selector
-        this.elements.tickSizeSelect.addEventListener('change', (e) => {
-            const tickSize = parseFloat(e.target.value);
-            this.footprintChart.setTickSize(tickSize);
-            dataAggregator.setTickSize(tickSize);
-
-            // Save settings
-            settingsManager.setTickSize(this.currentSymbol, tickSize);
-
-            dataAggregator.reset();
-        });
 
         // Help overlay
         this.elements.helpClose.addEventListener('click', () => {
@@ -544,43 +257,14 @@ class CryptoFlowApp {
             this.footprintChart.updatePrice(trade.price);
             this.orderBook.updatePrice(trade.price);
 
-            // Track trades for auto-filter
-            this.footprintChart.trackTrade(trade);
-
-            // Track big trades
-            const isBigTrade = this.footprintChart.addBigTrade(trade);
-            if (isBigTrade) {
-                audioService.playPing();
-            }
-
             // Process trade in aggregator
             dataAggregator.processTrade(trade);
         });
 
         // Depth data (throttled for performance)
-        this._lastHeatmapUpdate = 0;
         binanceWS.on('depth', (depth) => {
             if (this.currentSymbol && depth.symbol.toLowerCase() !== this.currentSymbol) return;
             this.orderBook.update(depth);
-            this.depthHeatmap.addDepthUpdate(depth);
-
-            // Throttle chart updates to max 1/sec (1000ms) to reduce flickering and load
-            const now = Date.now();
-            if (now - this._lastHeatmapUpdate >= 1000) {
-                const heatmapData = this.depthHeatmap.getHeatmapData();
-                console.log('[Heatmap] Updating chart with', heatmapData.snapshots?.length || 0, 'snapshots');
-                this.footprintChart.updateDepthHeatmap(heatmapData);
-
-                // L-toggle overlay: show strongest current book walls near price
-                const walls = this.depthHeatmap.getTopWalls({
-                    aroundPrice: this.currentPrice,
-                    countPerSide: 3,
-                    maxDistancePct: 0.6,
-                });
-                this.footprintChart.setLiquidityLevels(walls);
-
-                this._lastHeatmapUpdate = now;
-            }
         });
 
         // 24h ticker
@@ -593,15 +277,6 @@ class CryptoFlowApp {
         // Data aggregator events
         dataAggregator.on('candleUpdate', () => {
             this._updateCharts();
-
-            // Update Market Analysis panel
-            if (this.marketAnalysis && this.footprintChart) {
-                this.marketAnalysis.analyze({
-                    candles: this.footprintChart.candles,
-                    heatmapData: this.footprintChart.heatmapData,
-                    bigTrades: this.footprintChart.bigTrades
-                });
-            }
         });
 
         dataAggregator.on('statsUpdate', (stats) => {
@@ -656,31 +331,15 @@ class CryptoFlowApp {
         this.elements.loadingOverlay.classList.remove('hidden');
         this._updateLoadingText('Loading historical data...');
 
-        // Update tick size
-        // Priority: Saved setting > Default for symbol > Global default
-        const savedTickSize = settingsManager.getTickSize(symbol);
-        const tickSize = savedTickSize || this.tickSizes[symbol] || 1;
-
-        this.footprintChart.setTickSize(tickSize);
+        // Update tick size for aggregation
+        const tickSize = this.tickSizes[symbol] || 1;
         dataAggregator.setTickSize(tickSize);
-
-        // Update tick size selector UI
-        if (this.elements.tickSizeSelect) {
-            this.elements.tickSizeSelect.value = tickSize;
-        }
-
-        // Update big trade threshold (whale marker)
-        const bigTradeThreshold = this.bigTradeThresholds[symbol] || 5.0;
-        this.footprintChart.setBigTradeThreshold(bigTradeThreshold);
 
         // Reset data
         dataAggregator.reset();
         this.orderBook.clear();
-        this.depthHeatmap.reset();
-        // Load heatmap history in background (non-blocking)
-        this.depthHeatmap.setSymbol(symbol).then(() => {
-            this.footprintChart.updateDepthHeatmap(this.depthHeatmap.getHeatmapData());
-        });
+        this.footprintChart.setChannel(null);
+        this.footprintChart.setTradeSignals([]);
 
         // Update precision for order book
         if (symbol === 'btcusdt') {
@@ -856,22 +515,13 @@ class CryptoFlowApp {
     }
 
     /**
-     * Update footprint chart and volume profile
+     * Update chart data
      */
     _updateCharts() {
         const candles = dataAggregator.getCandles();
-        const volumeProfile = dataAggregator.getVolumeProfile();
-        const sessionMarkers = dataAggregator.getSessionMarkers();
-
         this.footprintChart.updateCandles(candles);
-        this.footprintChart.updateSessionMarkers(sessionMarkers);
-
-        // Get price range from footprint chart for volume profile alignment
-        const priceRange = this.footprintChart._calculatePriceRange();
-        this.volumeProfile.update(volumeProfile, priceRange);
-
-        // Update POC in footer
-        if (volumeProfile.poc) {
+        const volumeProfile = dataAggregator.getVolumeProfile();
+        if (volumeProfile.poc && this.elements.pocValue) {
             this.elements.pocValue.textContent = this._formatPrice(volumeProfile.poc);
         }
     }
@@ -898,12 +548,7 @@ class CryptoFlowApp {
                 console.log(`Added ${added} historical candles`);
 
                 if (added > 0) {
-                    // Adjust chart offset to maintain current view position
-                    // When we prepend N candles, old index 0 becomes index N
-                    // So we need to shift offsetX left by N * zoomX
-                    this.footprintChart.offsetX -= added * this.footprintChart.zoomX;
-                    
-                    // Update chart with new data
+                    this.footprintChart.shiftVisibleRange(added);
                     this._updateCharts();
                 }
             }

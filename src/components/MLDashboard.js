@@ -9,18 +9,12 @@ export class MLDashboard {
 
         // Detect environment - use VPS URL when running locally
         const isLocalHost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-        const baseUrl = isLocalHost ? 'http://134.185.107.33:3000' : '';
-        this.apiUrl = `${baseUrl}/api/ml`;
         this.paperApiUrl = isLocalHost ? 'http://134.185.107.33:5003' : `${window.location.protocol}//${window.location.hostname}:5003`;
 
-        this.status = null;
         this.expanded = false;
-        this.signals = [];
-        this.signalStats = {};
-        this.signalFilter = 'ALL'; // ALL, LONG, SHORT
-        this.activeMainTab = 'signals'; // 'signals' or 'paper'
         this.paperTradingData = null;
         this.footprintChart = null; // Reference to FootprintChart
+        this.selectedSignalKey = null;
 
         this._init();
         this._startPolling();
@@ -32,6 +26,12 @@ export class MLDashboard {
      */
     setFootprintChart(chart) {
         this.footprintChart = chart;
+        if (this.footprintChart) {
+            this.footprintChart.onSignalSelect = (signal) => {
+                this.selectedSignalKey = signal ? this._getSignalKey(signal) : null;
+                this._renderPaperTrading();
+            };
+        }
     }
 
     get isVisible() {
@@ -60,19 +60,15 @@ export class MLDashboard {
         this.container.innerHTML = `
             <div class="ml-dashboard">
                 <div class="ml-header" id="mlHeader">
-                    <span class="ml-icon">🤖</span>
-                    <span class="ml-title">ML Signal AI</span>
+                    <span class="ml-icon">📈</span>
+                    <span class="ml-title">Paper Trading</span>
                     <span class="ml-badge" id="mlBadge">--</span>
                     <span class="ml-expand">▼</span>
                 </div>
                 <div class="ml-content" id="mlContent" style="display: none;">
-                    <div class="ml-main-tabs">
-                        <button class="ml-main-tab active" data-tab="signals">📊 ML Signals</button>
-                        <button class="ml-main-tab" data-tab="paper">📈 Paper Trading</button>
-                    </div>
                     <div class="ml-tab-content" id="mlTabContent">
                         <div class="ml-stats" id="mlStats">
-                            Loading...
+                            Loading paper trading data...
                         </div>
                     </div>
                 </div>
@@ -93,37 +89,13 @@ export class MLDashboard {
             });
         }
 
-        // Main tab handlers
-        this._setupMainTabHandlers();
-
-        console.log('MLDashboard initialized (Dynamic Overlay Mode)');
+        console.log('Paper Trading dashboard initialized');
         this.setVisible(true);
-    }
-
-    _setupMainTabHandlers() {
-        const tabs = this.container.querySelectorAll('.ml-main-tab');
-        tabs.forEach(tab => {
-            tab.addEventListener('click', (e) => {
-                e.stopPropagation();
-                const tabName = tab.dataset.tab;
-                this.activeMainTab = tabName;
-
-                // Update active state
-                tabs.forEach(t => t.classList.remove('active'));
-                tab.classList.add('active');
-
-                // Switch content
-                if (tabName === 'signals') {
-                    this._updateUI();
-                } else if (tabName === 'paper') {
-                    this._fetchPaperTradingStatus();
-                }
-            });
-        });
     }
 
     async _fetchPaperTradingStatus() {
         const content = this.container.querySelector('#mlTabContent');
+        const badge = this.container.querySelector('#mlBadge');
         if (content) {
             content.innerHTML = '<div class="paper-no-data">Loading Paper Trading data...</div>';
         }
@@ -133,13 +105,21 @@ export class MLDashboard {
             if (!response.ok) throw new Error('Paper trading service not available');
             this.paperTradingData = await response.json();
             this._renderPaperTrading();
+            if (badge) {
+                badge.textContent = 'Live';
+                badge.className = 'ml-badge';
+            }
         } catch (error) {
             console.warn('Paper trading fetch error:', error);
+            if (badge) {
+                badge.textContent = 'Offline';
+                badge.className = 'ml-badge error';
+            }
             if (content) {
                 content.innerHTML = `
                     <div class="paper-no-data">
                         Paper Trading service not available<br>
-                        <span style="font-size: 9px; color: #666;">Start with: pm2 start ecosystem.config.cjs --only ml-paper</span>
+                        <span style="font-size: 9px; color: #666;">Start with: pm2 start ecosystem.config.cjs --only paper-trading</span>
                     </div>
                 `;
             }
@@ -156,21 +136,17 @@ export class MLDashboard {
             return;
         }
 
-        // Find best strategy by return
-        let bestKey = null;
-        let bestReturn = -Infinity;
-        for (const [key, data] of Object.entries(strategies)) {
-            if (data.return_pct > bestReturn) {
-                bestReturn = data.return_pct;
-                bestKey = key;
-            }
+        const noMlData = strategies['NO_ML'];
+        if (!noMlData) {
+            content.innerHTML = '<div class="paper-no-data">No NO_ML data available</div>';
+            return;
         }
 
-        const strategyOrder = ['NO_ML', 'ML_ENTRY', 'ML_COMBINED'];
+        const bestKey = 'NO_ML';
+        const bestReturn = noMlData.return_pct ?? 0;
+        const strategyOrder = ['NO_ML'];
         const strategyLabels = {
-            'NO_ML': '🎯 No ML (All Signals)',
-            'ML_ENTRY': '🧠 ML Entry Only',
-            'ML_COMBINED': '🚀 ML Combined'
+            'NO_ML': '🎯 No ML (All Signals)'
         };
 
         let html = '';
@@ -215,9 +191,8 @@ export class MLDashboard {
                 </div>
             `;
         }
-        // Active Trades Section (NO_ML strategy only for simplicity)
-        const noMlData = strategies['NO_ML'];
-        const activeTrades = noMlData?.active_trade_details || [];
+        // Active Trades Section
+        const activeTrades = noMlData.active_trade_details || [];
         if (activeTrades.length > 0) {
             html += `
                 <div class="paper-active-trades">
@@ -306,40 +281,50 @@ export class MLDashboard {
         }
 
         // Summary
-        const totalTrades = Object.values(strategies).reduce((sum, s) => sum + s.total_trades, 0) / 3;
+        const totalTrades = noMlData.total_trades;
+        const returnLabel = noMlData.return_pct >= 0
+            ? `+${noMlData.return_pct.toFixed(1)}%`
+            : `${noMlData.return_pct.toFixed(1)}%`;
         html += `
             <div class="paper-summary">
-                ${bestKey && bestReturn > 0 ? `Best: ${strategyLabels[bestKey]} (+${bestReturn.toFixed(1)}%)` : 'Waiting for trades...'}
+                Return: ${returnLabel} · Trades: ${totalTrades}
             </div>
         `;
 
         // Recent Signals section
         const recentSignals = this.paperTradingData.recent_signals || [];
-        if (recentSignals.length > 0) {
+        const displaySignals = recentSignals.slice(0, 10);
+        const displayKeys = displaySignals.map((signal) => this._getSignalKey(signal));
+        if (this.selectedSignalKey && !displayKeys.includes(this.selectedSignalKey)) {
+            this.selectedSignalKey = null;
+            if (this.footprintChart) {
+                this.footprintChart.setSelectedSignal(null);
+            }
+        }
+
+        if (displaySignals.length > 0) {
             html += `
                 <div class="paper-signals-section">
                     <div class="paper-signals-header">📋 Recent Signals</div>
                     <div class="paper-signals-list">
             `;
 
-            for (const signal of recentSignals.slice(0, 5)) {
+            displaySignals.forEach((signal, index) => {
                 const isLong = signal.direction === 'LONG';
                 const dirClass = isLong ? 'long' : 'short';
                 const dirIcon = isLong ? '📈' : '📉';
-
-                // Setup type styling
                 const setupType = signal.setup_type || 'UNKNOWN';
                 const isPivot = setupType.includes('PIVOT');
                 const isFakeout = setupType.includes('FAKEOUT');
                 const setupClass = isPivot ? 'pivot' : (isFakeout ? 'fakeout' : 'bounce');
-
-                // Format timestamp
                 const time = new Date(signal.timestamp).toLocaleString('ko-KR', {
                     month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
                 });
+                const key = this._getSignalKey(signal);
+                const selectedClass = key === this.selectedSignalKey ? ' selected' : '';
 
                 html += `
-                    <div class="paper-signal-item ${dirClass}">
+                    <div class="paper-signal-item ${dirClass}${selectedClass}" data-signal-index="${index}">
                         <div class="paper-signal-header">
                             <span class="paper-signal-dir ${dirClass}">${dirIcon} ${signal.direction}</span>
                             <span class="paper-signal-type ${setupClass}">${setupType}</span>
@@ -351,12 +336,9 @@ export class MLDashboard {
                             <span class="tp">TP1: ${signal.tp1_price?.toLocaleString() || '--'}</span>
                             <span class="tp">TP2: ${signal.tp2_price?.toLocaleString() || '--'}</span>
                         </div>
-                        <div class="paper-signal-prob">
-                            ML Prob: ${signal.entry_prob ? (signal.entry_prob * 100).toFixed(0) + '%' : '--'}
-                        </div>
                     </div>
                 `;
-            }
+            });
 
             html += `
                     </div>
@@ -372,6 +354,7 @@ export class MLDashboard {
         }
 
         content.innerHTML = html;
+        this._attachSignalHandlers(displaySignals);
     }
 
     _addStyles() {
@@ -847,6 +830,18 @@ export class MLDashboard {
                 background: rgba(255,255,255,0.03);
                 border-radius: 4px;
                 border-left: 3px solid #00e676;
+                cursor: pointer;
+                transition: all 0.2s;
+            }
+
+            .paper-signal-item:hover {
+                background: rgba(255,255,255,0.06);
+            }
+
+            .paper-signal-item.selected {
+                background: rgba(245, 158, 11, 0.15);
+                border-left-color: #f59e0b;
+                box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.25) inset;
             }
 
             .paper-signal-item.short {
@@ -1108,6 +1103,38 @@ export class MLDashboard {
         document.head.appendChild(style);
     }
 
+    _attachSignalHandlers(signals) {
+        if (!this.container) return;
+        const items = this.container.querySelectorAll('.paper-signal-item');
+        items.forEach((item) => {
+            item.addEventListener('click', () => {
+                const index = Number(item.dataset.signalIndex);
+                const signal = signals[index];
+                if (!signal) return;
+                const key = this._getSignalKey(signal);
+                if (this.selectedSignalKey === key) {
+                    this.selectedSignalKey = null;
+                    if (this.footprintChart) {
+                        this.footprintChart.setSelectedSignal(null);
+                    }
+                } else {
+                    this.selectedSignalKey = key;
+                    if (this.footprintChart) {
+                        this.footprintChart.setSelectedSignal(signal);
+                    }
+                }
+                this._renderPaperTrading();
+            });
+        });
+    }
+
+    _getSignalKey(signal) {
+        const ts = Number(signal.timestamp || 0);
+        const dir = signal.direction || '';
+        const entry = Number(signal.entry_price || 0);
+        return `${ts}:${dir}:${entry}`;
+    }
+
     async _fetchStatus() {
         try {
             const response = await fetch(`${this.apiUrl}/status`);
@@ -1122,14 +1149,8 @@ export class MLDashboard {
     }
 
     _startPolling() {
-        this._fetchStatus().finally(() => {
-            // Also refresh paper trading if that tab is active
-            if (this.activeMainTab === 'paper') {
-                this._fetchPaperTradingStatus();
-            }
-            // Adaptive polling: 60s if error/offline, 30s if active
-            const delay = this.status && this.status.error ? 60000 : 30000;
-            this.pollTimeout = setTimeout(() => this._startPolling(), delay);
+        this._fetchPaperTradingStatus().finally(() => {
+            this.pollTimeout = setTimeout(() => this._startPolling(), 30000);
         });
     }
 
