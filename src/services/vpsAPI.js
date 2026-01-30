@@ -8,10 +8,8 @@ export class VpsAPI {
         // Detect environment
         const isLocalHost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 
-        // If dev (localhost), point to VPS IP. If prod (on VPS), use relative path to avoid CORS/Network issues.
-        // If dev (localhost), point to VPS IP (Secure WSS). If prod (on VPS), use relative WSS default (443).
-        const defaultBase = isLocalHost ? 'http://134.185.107.33:3000' : '';
-        const defaultWs = isLocalHost ? 'ws://134.185.107.33:3000' : `wss://${window.location.hostname}`;
+        const defaultBase = `http://${isLocalHost ? '134.185.107.33' : window.location.hostname}:3000`;
+        const defaultWs = `ws://${isLocalHost ? '134.185.107.33' : window.location.hostname}:3000`;
 
         this.baseUrl = options.baseUrl || defaultBase;
         this.wsUrl = options.wsUrl || defaultWs;
