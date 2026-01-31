@@ -1099,6 +1099,89 @@ export class MLDashboard {
                 font-size: 11px;
                 padding: 20px;
             }
+
+            /* Mobile Responsive */
+            @media (max-width: 768px) {
+                .ml-dashboard {
+                    top: auto;
+                    bottom: 0;
+                    left: 0;
+                    right: 0;
+                    width: 100%;
+                    max-width: 100%;
+                    min-width: auto;
+                    border-radius: 16px 16px 0 0;
+                    max-height: 70vh;
+                }
+
+                .ml-header {
+                    padding: 14px 16px;
+                }
+
+                .ml-content {
+                    max-height: 60vh;
+                    padding: 16px;
+                }
+
+                .ml-main-tab {
+                    padding: 12px;
+                    font-size: 12px;
+                }
+
+                .paper-strategy {
+                    padding: 12px;
+                }
+
+                .paper-strategy-stats {
+                    grid-template-columns: 1fr 1fr;
+                    gap: 8px;
+                    font-size: 11px;
+                }
+
+                .paper-signal-item {
+                    padding: 12px;
+                }
+
+                .paper-signal-header {
+                    flex-wrap: wrap;
+                    gap: 8px;
+                }
+
+                .paper-signal-prices {
+                    flex-wrap: wrap;
+                    gap: 8px;
+                    font-size: 10px;
+                }
+
+                .active-trade-prices {
+                    grid-template-columns: repeat(2, 1fr);
+                    gap: 8px;
+                }
+
+                .channel-levels {
+                    font-size: 11px;
+                }
+
+                .ml-btn {
+                    padding: 12px;
+                    font-size: 13px;
+                    min-height: 44px;
+                }
+            }
+
+            @media (max-width: 480px) {
+                .ml-dashboard {
+                    max-height: 80vh;
+                }
+
+                .paper-strategy-stats {
+                    grid-template-columns: 1fr;
+                }
+
+                .active-trade-prices {
+                    grid-template-columns: 1fr 1fr;
+                }
+            }
         `;
         document.head.appendChild(style);
     }
