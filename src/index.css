@@ -1311,3 +1311,195 @@ input:checked+.slider-switch:before {
   min-width: 40px;
   text-align: right;
 }
+
+/* ========================================
+   Responsive & Mobile Styles
+   ======================================== */
+
+/* Base Mobile Elements (Hidden on Desktop) */
+.mobile-only {
+  display: none !important;
+}
+
+.icon-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  transition: var(--transition-fast);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.icon-btn:hover, .icon-btn.active {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* Nav Group (Container for controls) */
+.nav-group {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+/* ========================================
+   Media Queries
+   ======================================== */
+
+/* Tablet (max-width: 1024px) */
+@media (max-width: 1024px) {
+  :root {
+    --sidebar-width: 240px;
+  }
+  
+  html {
+    font-size: 13px;
+  }
+
+  .header {
+    padding: 0 12px;
+  }
+
+  .header-left, .header-right {
+    gap: 16px;
+  }
+  
+  .logo-text {
+    display: none; /* Hide logo text on tablet to save space */
+  }
+}
+
+/* Mobile (max-width: 768px) */
+@media (max-width: 768px) {
+  .mobile-only {
+    display: flex !important;
+  }
+  
+  /* Reset Main Grid */
+  .main-content {
+    grid-template-columns: 1fr; /* Single column */
+  }
+
+  /* Header Layout */
+  .header {
+    padding: 0 12px;
+  }
+  
+  .header-left {
+    gap: 12px;
+  }
+  
+  .logo {
+    font-size: 1.1rem;
+  }
+  
+  .logo-text {
+    display: block; /* Bring back on mobile since we hide controls */
+  }
+
+  /* Navigation Drawer */
+  .nav-group {
+    position: fixed;
+    top: var(--header-height);
+    left: 0;
+    width: 100%;
+    background: var(--bg-secondary); /* Solid background */
+    padding: 16px;
+    flex-direction: column;
+    align-items: stretch;
+    border-bottom: 1px solid var(--border-color);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    z-index: 90;
+    
+    /* Animation state */
+    transform: translateY(-150%);
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    opacity: 0;
+    pointer-events: none;
+  }
+  
+  .nav-group.active {
+    transform: translateY(0);
+    opacity: 1;
+    pointer-events: auto;
+  }
+  
+  /* Make controls touch-friendly */
+  .exchange-selector select,
+  .symbol-selector select {
+    width: 100%;
+    padding: 12px;
+    font-size: 1rem;
+  }
+  
+  .timeframe-selector {
+    width: 100%;
+    justify-content: space-between;
+    padding: 4px;
+    background: var(--bg-tertiary);
+  }
+  
+  .tf-btn {
+    flex: 1;
+    text-align: center;
+    padding: 10px 0;
+  }
+
+  /* Sidebar / Order Book */
+  .orderbook-section {
+    position: fixed;
+    top: var(--header-height);
+    right: 0;
+    bottom: var(--footer-height);
+    width: 85%;
+    max-width: 320px;
+    z-index: 50;
+    border-left: 1px solid var(--border-color);
+    box-shadow: -4px 0 16px rgba(0,0,0,0.5);
+    
+    /* Slide in from right */
+    transform: translateX(100%);
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  
+  .orderbook-section.active {
+    transform: translateX(0);
+  }
+
+  /* Footer */
+  .footer {
+    padding: 4px 8px;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  
+  .stat-item {
+    font-size: 0.75rem;
+    gap: 4px;
+  }
+  
+  /* Hide less critical stats on very small screens */
+  .stat-item:nth-child(4) { /* Trades/s */
+    display: none;
+  }
+  
+  /* Adjust Price Display */
+  .price-display .price {
+    font-size: 1.1rem;
+  }
+}
+
+/* Small Mobile (max-width: 480px) */
+@media (max-width: 480px) {
+  .logo-text {
+    display: none;
+  }
+  
+  .stat-item:nth-child(5) { /* POC */
+    display: none;
+  }
+}

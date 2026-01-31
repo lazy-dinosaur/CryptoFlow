@@ -47,33 +47,42 @@
     <!-- Header -->
     <header class="header">
       <div class="header-left">
+        <button id="mobileMenuBtn" class="icon-btn mobile-only">
+          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
+        </button>
         <div class="logo">
           <span class="logo-icon">📊</span>
           <span class="logo-text">CryptoFlow</span>
         </div>
-        <div class="exchange-selector">
-          <select id="exchangeSelect">
-            <option value="binance">Binance</option>
-            <option value="bybit">Bybit</option>
-            <option value="bitget">Bitget</option>
-          </select>
-        </div>
-        <div class="symbol-selector">
-          <select id="symbolSelect">
-            <option value="btcusdt">BTCUSDT</option>
-            <option value="ethusdt">ETHUSDT</option>
-            <option value="solusdt">SOLUSDT</option>
-            <option value="bnbusdt">BNBUSDT</option>
-          </select>
-        </div>
-        <div class="timeframe-selector">
-          <button class="tf-btn active" data-tf="15">15m</button>
-          <button class="tf-btn" data-tf="60">1H</button>
-          <button class="tf-btn" data-tf="240">4H</button>
-          <button class="tf-btn" data-tf="1440">1D</button>
+        
+        <div class="nav-group" id="navGroup">
+          <div class="exchange-selector">
+            <select id="exchangeSelect">
+              <option value="binance">Binance</option>
+              <option value="bybit">Bybit</option>
+              <option value="bitget">Bitget</option>
+            </select>
+          </div>
+          <div class="symbol-selector">
+            <select id="symbolSelect">
+              <option value="btcusdt">BTCUSDT</option>
+              <option value="ethusdt">ETHUSDT</option>
+              <option value="solusdt">SOLUSDT</option>
+              <option value="bnbusdt">BNBUSDT</option>
+            </select>
+          </div>
+          <div class="timeframe-selector">
+            <button class="tf-btn active" data-tf="15">15m</button>
+            <button class="tf-btn" data-tf="60">1H</button>
+            <button class="tf-btn" data-tf="240">4H</button>
+            <button class="tf-btn" data-tf="1440">1D</button>
+          </div>
         </div>
       </div>
       <div class="header-right">
+        <button id="mobileSidebarBtn" class="icon-btn mobile-only" title="Order Book">
+          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
+        </button>
         <div class="connection-status" id="connectionStatus">
           <span class="status-dot"></span>
           <span class="status-text">Disconnected</span>

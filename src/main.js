@@ -46,7 +46,11 @@ class CryptoFlowApp {
             loadingText: document.querySelector('.loading-text'),
             helpOverlay: document.getElementById('helpOverlay'),
             helpClose: document.getElementById('helpClose'),
-            toggleML: document.getElementById('toggleML')
+            toggleML: document.getElementById('toggleML'),
+            mobileMenuBtn: document.getElementById('mobileMenuBtn'),
+            mobileSidebarBtn: document.getElementById('mobileSidebarBtn'),
+            navGroup: document.getElementById('navGroup'),
+            orderBookSection: document.querySelector('.orderbook-section')
         };
 
         // Tick sizes for different symbols
@@ -225,6 +229,40 @@ class CryptoFlowApp {
             }
             if (e.key === 'Escape') {
                 this.elements.helpOverlay.classList.add('hidden');
+                if (this.elements.navGroup) this.elements.navGroup.classList.remove('active');
+                if (this.elements.orderBookSection) this.elements.orderBookSection.classList.remove('active');
+            }
+        });
+
+        if (this.elements.mobileMenuBtn) {
+            this.elements.mobileMenuBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.elements.navGroup.classList.toggle('active');
+                if (this.elements.orderBookSection) this.elements.orderBookSection.classList.remove('active');
+            });
+        }
+
+        if (this.elements.mobileSidebarBtn) {
+            this.elements.mobileSidebarBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.elements.orderBookSection.classList.toggle('active');
+                if (this.elements.navGroup) this.elements.navGroup.classList.remove('active');
+            });
+        }
+
+        document.addEventListener('click', (e) => {
+            if (this.elements.navGroup && 
+                this.elements.navGroup.classList.contains('active') && 
+                !this.elements.navGroup.contains(e.target) && 
+                !this.elements.mobileMenuBtn.contains(e.target)) {
+                this.elements.navGroup.classList.remove('active');
+            }
+            
+            if (this.elements.orderBookSection && 
+                this.elements.orderBookSection.classList.contains('active') && 
+                !this.elements.orderBookSection.contains(e.target) && 
+                !this.elements.mobileSidebarBtn.contains(e.target)) {
+                this.elements.orderBookSection.classList.remove('active');
             }
         });
     }
