@@ -161,6 +161,9 @@ class MLPaperTradingService:
         # Track last processed candle time for candle-close entry (like backtest)
         self.last_processed_candle_time = 0
 
+        # Load recent signals from DB to prevent duplicate entries after restart
+        self.recent_signals = self._load_recent_signal_keys()
+
     def _init_db(self):
         """Initialize SQLite database for paper trading."""
         os.makedirs(os.path.dirname(PAPER_DB_PATH), exist_ok=True)
@@ -325,6 +328,34 @@ class MLPaperTradingService:
             conn.close()
         except Exception as e:
             print(f"[LOAD] Error loading state: {e}, starting fresh")
+
+    def _load_recent_signal_keys(self) -> set:
+        """Load recent signal keys from DB to prevent duplicate entries after restart."""
+        SIGNAL_COOLDOWN_MS = 20 * 15 * 60 * 1000  # 5 hours
+        recent_keys = set()
+
+        try:
+            conn = get_db_connection(PAPER_DB_PATH)
+            c = conn.cursor()
+            c.execute(
+                """SELECT timestamp, channel_support, channel_resistance 
+                   FROM signals ORDER BY id DESC LIMIT 100"""
+            )
+            for row in c.fetchall():
+                try:
+                    ts = int(row[0])
+                    support = round(row[1])
+                    resistance = round(row[2])
+                    key = f"{support}_{resistance}_{ts // SIGNAL_COOLDOWN_MS}"
+                    recent_keys.add(key)
+                except (ValueError, TypeError):
+                    pass
+            conn.close()
+            print(f"[LOAD] Loaded {len(recent_keys)} recent signal keys")
+        except Exception as e:
+            print(f"[LOAD] Error loading signal keys: {e}")
+
+        return recent_keys
 
     def _save_signal(self, signal: Signal) -> int:
         """Save signal to database and return ID. Returns -1 if duplicate."""
@@ -598,6 +629,7 @@ class MLPaperTradingService:
                         trade.status = "TP1_HIT"
                         if not trade.tp1_profit_taken:
                             trade.tp1_profit_taken = True
+                            self._update_trade(trade)  # Persist to DB immediately
                             print(
                                 f"\n[{strategy_name}] TP1 HIT - tracking partial profit"
                             )
@@ -605,6 +637,7 @@ class MLPaperTradingService:
                         trade.status = "TP1_HIT"
                         if not trade.tp1_profit_taken:
                             trade.tp1_profit_taken = True
+                            self._update_trade(trade)  # Persist to DB immediately
                             print(
                                 f"\n[{strategy_name}] TP1 HIT - tracking partial profit"
                             )
@@ -1313,12 +1346,19 @@ class MLPaperTradingService:
 
         mid_price = (channel.resistance + channel.support) / 2
 
-        # Check for bounce signals on COMPLETED candle
-        # Cooldown: same channel, same setup for 20 candles (5 hours) - matches backtest
-        SIGNAL_COOLDOWN_MS = 20 * 15 * 60 * 1000  # 20 x 15min = 5 hours
+        # CRITICAL: Validate channel width before generating signals
+        # This matches backtest's min_channel_width filter (narrow channels had 50% WR)
+        MIN_CHANNEL_WIDTH = 0.015  # 1.5%
+        channel_width_pct = (channel.resistance - channel.support) / channel.support
+        if channel_width_pct < MIN_CHANNEL_WIDTH:
+            print(
+                f"[SCAN] Skipping signal - channel too narrow: {channel_width_pct * 100:.2f}% < {MIN_CHANNEL_WIDTH * 100:.1f}%"
+            )
+            self.last_processed_candle_time = current_candle_time
+            return
+
+        SIGNAL_COOLDOWN_MS = 20 * 15 * 60 * 1000  # 5 hours (matches backtest's i // 20)
         signal_key = f"{round(channel.support)}_{round(channel.resistance)}_{completed_candle_time // SIGNAL_COOLDOWN_MS}"
-        if not hasattr(self, "recent_signals"):
-            self.recent_signals = set()
 
         if signal_key not in self.recent_signals:
             # Support bounce → LONG (on completed candle)
