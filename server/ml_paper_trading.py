@@ -140,6 +140,9 @@ class MLPaperTradingService:
         # Evolving channels: key=(resistance_idx, support_idx) -> Channel
         self.active_channels: Dict[tuple, Channel] = {}
         self.current_channel: Optional[Channel] = None
+        self.previous_channel: Optional[Channel] = (
+            None  # Used for signal generation (matches backtest htf_idx-1)
+        )
         self.pending_fakeouts: Dict[str, dict] = {}
         # Track last processed HTF index for channel updates
         self.last_htf_idx: int = 0
@@ -1262,6 +1265,7 @@ class MLPaperTradingService:
         # Drop last (incomplete) HTF candle to match backtest behavior
         # Backtest uses htf_idx - 1 to avoid lookahead bias from partial candles
         df_1h_closed = df_1h.iloc[:-1].copy()
+        current_htf_idx = len(df_1h_closed) - 1
         print(
             f"[SCAN] Using {len(df_1h_closed)} closed 1h candles for channel (dropped incomplete)"
         )
@@ -1273,6 +1277,16 @@ class MLPaperTradingService:
         if not self.active_channels:
             print(f"[CHANNEL] No active channels, initializing from historical data...")
             self._initialize_channels(df_1h_closed)
+            # Initialize previous_channel from second-to-last iteration
+            self.previous_channel = self.current_channel
+
+        # Detect new HTF candle - shift current to previous (matches backtest htf_idx-1)
+        if current_htf_idx > self.last_htf_idx:
+            self.previous_channel = self.current_channel
+            self.last_htf_idx = current_htf_idx
+            print(
+                f"[CHANNEL] New HTF candle {current_htf_idx}, shifted channel to previous"
+            )
 
         # Invalidate old channel if price moved too far (>3% away)
         if hasattr(self, "current_channel") and self.current_channel:
@@ -1285,6 +1299,7 @@ class MLPaperTradingService:
                     f"[CHANNEL] Price {current_price:.0f} out of range, invalidating old channel {ch.support:.0f}-{ch.resistance:.0f}"
                 )
                 self.current_channel = None
+                self.previous_channel = None
 
         channel = self._update_channel(df_1h_closed)
         if channel:
@@ -1293,11 +1308,12 @@ class MLPaperTradingService:
                 f"[CHANNEL] Detected: {channel.support:.0f} - {channel.resistance:.0f} (touches: S={channel.support_touches}, R={channel.resistance_touches})"
             )
 
-        if not hasattr(self, "current_channel") or self.current_channel is None:
-            print(f"[SCAN] No channel detected yet")
+        # Use PREVIOUS channel for signal generation (matches backtest htf_idx-1)
+        if self.previous_channel is None:
+            print(f"[SCAN] No previous channel yet (waiting for 2nd HTF bar)")
             return
 
-        channel = self.current_channel
+        channel = self.previous_channel
         current_close = df_15m["close"].iloc[-1]
         current_high = df_15m["high"].iloc[-1]
         current_low = df_15m["low"].iloc[-1]
