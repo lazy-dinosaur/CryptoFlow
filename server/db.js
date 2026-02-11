@@ -17,10 +17,11 @@ const DB_PATH = path.join(DATA_DIR, 'cryptoflow.db');
 const db = new Database(DB_PATH);
 
 // Enable WAL mode and configure for multi-process access
+// Increased timeouts to prevent "database is locked" during long backfill operations
 db.pragma('journal_mode = WAL');
-db.pragma('busy_timeout = 2000');
+db.pragma('busy_timeout = 10000');  // 10 seconds (was 2s) - backfill can take 5+ seconds
 db.pragma('synchronous = NORMAL');
-db.pragma('wal_autocheckpoint = 1000');
+db.pragma('wal_autocheckpoint = 5000');  // Less frequent checkpoints (was 1000)
 
 /**
  * Initialize database schema (candles only)

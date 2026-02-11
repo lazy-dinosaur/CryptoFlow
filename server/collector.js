@@ -239,9 +239,10 @@ async function backfillCandles(exchange, symbol, timeframe) {
 }
 
 let syncInProgress = false;
+let backfillInProgress = false;
 
 async function syncLatestCandles() {
-    if (syncInProgress) return;
+    if (syncInProgress || backfillInProgress) return;
     syncInProgress = true;
 
     try {
@@ -283,26 +284,31 @@ async function syncLatestCandles() {
 }
 
 async function backfillAll() {
-    console.log(`\n========================================`);
-    console.log(`  Backfill History`);
-    console.log(`========================================\n`);
-    
-    for (const [exchange, exchangeConfig] of Object.entries(CONFIG.exchanges)) {
-        if (!exchangeConfig.enabled) continue;
-        const days = exchangeConfig.historyDays || CONFIG.historyDays;
-        console.log(`[${exchange.toUpperCase()}] ${exchangeConfig.symbols.join(', ')} (${days} days)`);
+    backfillInProgress = true;
+    try {
+        console.log(`\n========================================`);
+        console.log(`  Backfill History`);
+        console.log(`========================================\n`);
         
-        for (const symbol of exchangeConfig.symbols) {
-            for (const timeframe of TIMEFRAMES) {
-                const count = await backfillCandles(exchange, symbol, timeframe);
-                if (count > 0) {
-                    console.log(`  ${symbol} ${timeframe.name}: +${count} candles`);
+        for (const [exchange, exchangeConfig] of Object.entries(CONFIG.exchanges)) {
+            if (!exchangeConfig.enabled) continue;
+            const days = exchangeConfig.historyDays || CONFIG.historyDays;
+            console.log(`[${exchange.toUpperCase()}] ${exchangeConfig.symbols.join(', ')} (${days} days)`);
+            
+            for (const symbol of exchangeConfig.symbols) {
+                for (const timeframe of TIMEFRAMES) {
+                    const count = await backfillCandles(exchange, symbol, timeframe);
+                    if (count > 0) {
+                        console.log(`  ${symbol} ${timeframe.name}: +${count} candles`);
+                    }
+                    await sleep(CONFIG.requestDelayMs);
                 }
-                await sleep(CONFIG.requestDelayMs);
             }
         }
+        console.log(`\nBackfill complete.`);
+    } finally {
+        backfillInProgress = false;
     }
-    console.log(`\nBackfill complete.`);
 }
 
 async function start() {
