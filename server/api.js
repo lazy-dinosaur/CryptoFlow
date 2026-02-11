@@ -13,10 +13,10 @@ const path = require('path');
 const db = require('./db.js');
 const { CONFIG } = require('./collector.js');
 
-const PORT = process.env.PORT || 443;
-
 const SSL_KEY = path.join(__dirname, '..', 'ssl', 'key.pem');
 const SSL_CERT = path.join(__dirname, '..', 'ssl', 'cert.pem');
+const SSL_EXISTS = fs.existsSync(SSL_KEY) && fs.existsSync(SSL_CERT);
+const PORT = process.env.PORT || (SSL_EXISTS ? 443 : 3000);
 
 const app = express();
 const compression = require('compression');
@@ -99,15 +99,15 @@ app.get('/api/candles', (req, res) => {
 // ==================== WEBSOCKET SERVER ====================
 
 let server;
-try {
+if (SSL_EXISTS) {
     const sslOptions = {
         key: fs.readFileSync(SSL_KEY),
         cert: fs.readFileSync(SSL_CERT)
     };
     server = https.createServer(sslOptions, app);
     console.log('HTTPS mode enabled');
-} catch (err) {
-    console.log('SSL not found, using HTTP');
+} else {
+    console.log('SSL not found, using HTTP on port', PORT);
     server = http.createServer(app);
 }
 
@@ -184,7 +184,7 @@ function broadcastCandle(fullSymbol, candle) {
 
 function start() {
     server.listen(PORT, () => {
-        const protocol = PORT === 443 ? 'https' : 'http';
+        const protocol = SSL_EXISTS ? 'https' : 'http';
         console.log(`API running on ${protocol}://localhost:${PORT}`);
     });
 }
