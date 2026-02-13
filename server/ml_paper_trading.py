@@ -1253,7 +1253,7 @@ class MLPaperTradingService:
 
     def _scan_for_signals(self):
         """Scan for new trading signals."""
-        df_1h = self._load_candles(HTF, 200)
+        df_1h = self._load_candles(HTF, 1440)  # 60 days to match backtest
         df_15m = self._load_candles(LTF, 500)
 
         print(f"[SCAN] Loaded {len(df_1h)} 1h candles, {len(df_15m)} 15m candles")
