@@ -95,23 +95,40 @@ def simulate_trade(
         exit_price = df_15m["close"].iloc[min(entry_idx + 99, len(df_15m) - 1)]
         exit_reason = "TIMEOUT"
 
+    # Calculate component pnl percentages
     if direction == "LONG":
-        pnl_pct = (exit_price - entry_price) / entry_price
+        sl_pct = (sl_price - entry_price) / entry_price
+        tp1_pct = (tp1_price - entry_price) / entry_price
+        tp2_pct = (tp2_price - entry_price) / entry_price
+        exit_pct = (exit_price - entry_price) / entry_price
     else:
-        pnl_pct = (entry_price - exit_price) / entry_price
+        sl_pct = (entry_price - sl_price) / entry_price
+        tp1_pct = (entry_price - tp1_price) / entry_price
+        tp2_pct = (entry_price - tp2_price) / entry_price
+        exit_pct = (entry_price - exit_price) / entry_price
 
-    if tp1_hit and exit_reason == "SL":
-        pnl_pct = (
-            pnl_pct * 0.5
-            + (
-                (tp1_price - entry_price) / entry_price
-                if direction == "LONG"
-                else (entry_price - tp1_price) / entry_price
-            )
-            * 0.5
-        )
+    # 50/50 partial profit calculation (no BE stop)
+    if exit_reason == "SL":
+        if tp1_hit:
+            pnl_pct = 0.5 * tp1_pct + 0.5 * sl_pct
+        else:
+            pnl_pct = sl_pct
+    elif exit_reason == "TP2":
+        pnl_pct = 0.5 * tp1_pct + 0.5 * tp2_pct
+    elif exit_reason == "TIMEOUT":
+        if tp1_hit:
+            pnl_pct = 0.5 * tp1_pct + 0.5 * exit_pct
+        else:
+            pnl_pct = exit_pct
 
-    return {"pnl_pct": pnl_pct, "exit_reason": exit_reason, "tp1_hit": tp1_hit}
+    sl_dist = abs(sl_price - entry_price) / entry_price
+
+    return {
+        "pnl_pct": pnl_pct,
+        "exit_reason": exit_reason,
+        "tp1_hit": tp1_hit,
+        "sl_dist": sl_dist,
+    }
 
 
 def run_backtest(df_1h, df_15m) -> BacktestResult:
@@ -161,7 +178,7 @@ def run_backtest(df_1h, df_15m) -> BacktestResult:
 
     capital = 10000
     risk_pct = 0.015
-    max_leverage = 15
+    max_leverage = 20
     fee_pct = 0.0004
     peak = capital
     max_dd = 0
@@ -169,10 +186,7 @@ def run_backtest(df_1h, df_15m) -> BacktestResult:
     losses = 0
 
     for t in trades:
-        risk_amount = capital * risk_pct
-        leverage = min(
-            risk_pct / abs(t["pnl_pct"]) if t["pnl_pct"] != 0 else 1, max_leverage
-        )
+        leverage = min(risk_pct / t["sl_dist"] if t["sl_dist"] > 0 else 1, max_leverage)
         position_size = capital * leverage
         gross_pnl = position_size * t["pnl_pct"]
         fees = position_size * fee_pct * 2

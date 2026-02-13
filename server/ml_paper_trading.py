@@ -71,7 +71,7 @@ SL_BUFFER_PCT = 0.0008  # Match backtest settings
 # Paper trading parameters
 INITIAL_CAPITAL = 10000.0
 RISK_PCT = 0.015
-MAX_LEVERAGE = 15
+MAX_LEVERAGE = 20
 FEE_PCT = 0.0004
 MAX_HOLD_CANDLES = 150
 
@@ -608,53 +608,40 @@ class MLPaperTradingService:
                             f"\n[{strategy_name}] Trade timed out after {candles_since_entry} candles"
                         )
 
-                if not timed_out and trade.status == "ACTIVE":
-                    # Check SL
+                if not timed_out and (
+                    trade.status == "ACTIVE" or trade.status == "TP1_HIT"
+                ):
+                    # Check SL (original SL, even after TP1 - no BE stop)
                     if is_long and current_low <= trade.sl_price:
                         trade.status = "SL_HIT"
-                        pnl_pct = (
-                            trade.sl_price - trade.entry_price
-                        ) / trade.entry_price
                         closed = True
                     elif not is_long and current_high >= trade.sl_price:
                         trade.status = "SL_HIT"
-                        pnl_pct = (
-                            trade.entry_price - trade.sl_price
-                        ) / trade.entry_price
                         closed = True
-                    # Check TP1
-                    elif is_long and current_high >= trade.tp1_price:
-                        trade.status = "TP1_HIT"
-                        if not trade.tp1_profit_taken:
+                    # Check TP1 (only if not already hit)
+                    elif not trade.tp1_profit_taken:
+                        if is_long and current_high >= trade.tp1_price:
+                            trade.status = "TP1_HIT"
                             trade.tp1_profit_taken = True
                             self._update_trade(trade)  # Persist to DB immediately
                             print(
                                 f"\n[{strategy_name}] TP1 HIT - tracking partial profit"
                             )
-                    elif not is_long and current_low <= trade.tp1_price:
-                        trade.status = "TP1_HIT"
-                        if not trade.tp1_profit_taken:
+                        elif not is_long and current_low <= trade.tp1_price:
+                            trade.status = "TP1_HIT"
                             trade.tp1_profit_taken = True
                             self._update_trade(trade)  # Persist to DB immediately
                             print(
                                 f"\n[{strategy_name}] TP1 HIT - tracking partial profit"
                             )
-
-                elif not timed_out and trade.status == "TP1_HIT":
-                    # Check BE (breakeven stop after TP1) - remaining 50% exits at 0
-                    if is_long and current_low <= trade.entry_price:
-                        trade.status = "BE_HIT"
-                        closed = True
-                    elif not is_long and current_high >= trade.entry_price:
-                        trade.status = "BE_HIT"
-                        closed = True
-                    # Check TP2 - remaining 50% profit
-                    elif is_long and current_high >= trade.tp2_price:
-                        trade.status = "TP2_HIT"
-                        closed = True
-                    elif not is_long and current_low <= trade.tp2_price:
-                        trade.status = "TP2_HIT"
-                        closed = True
+                    # Check TP2 (after TP1 hit)
+                    if not closed and trade.tp1_profit_taken:
+                        if is_long and current_high >= trade.tp2_price:
+                            trade.status = "TP2_HIT"
+                            closed = True
+                        elif not is_long and current_low <= trade.tp2_price:
+                            trade.status = "TP2_HIT"
+                            closed = True
 
                 if closed:
                     trade.closed_at = now_ms
@@ -681,13 +668,28 @@ class MLPaperTradingService:
                         ) / trade.entry_price
 
                     if trade.status == "SL_HIT":
-                        pnl_pct = sl_pct
-                    elif trade.status == "BE_HIT":
-                        pnl_pct = 0.5 * tp1_pct
+                        if trade.tp1_profit_taken:
+                            pnl_pct = 0.5 * tp1_pct + 0.5 * sl_pct
+                        else:
+                            pnl_pct = sl_pct
                     elif trade.status == "TP2_HIT":
                         pnl_pct = 0.5 * tp1_pct + 0.5 * tp2_pct
                     elif trade.status == "TIMEOUT":
-                        pnl_pct = 0.5 * tp1_pct if trade.tp1_profit_taken else 0.0
+                        if trade.tp1_profit_taken:
+                            exit_pct = (
+                                (current_price - trade.entry_price) / trade.entry_price
+                                if is_long
+                                else (trade.entry_price - current_price)
+                                / trade.entry_price
+                            )
+                            pnl_pct = 0.5 * tp1_pct + 0.5 * exit_pct
+                        else:
+                            pnl_pct = (
+                                (current_price - trade.entry_price) / trade.entry_price
+                                if is_long
+                                else (trade.entry_price - current_price)
+                                / trade.entry_price
+                            )
                     else:
                         pnl_pct = 0.0
 
