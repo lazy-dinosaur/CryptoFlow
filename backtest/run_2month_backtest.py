@@ -64,7 +64,8 @@ def simulate_trade(
     exit_price = None
     exit_reason = None
 
-    for j in range(entry_idx + 1, min(entry_idx + 100, len(df_15m))):
+    max_hold = 150
+    for j in range(entry_idx + 1, min(entry_idx + max_hold, len(df_15m))):
         high = df_15m["high"].iloc[j]
         low = df_15m["low"].iloc[j]
 
@@ -92,7 +93,9 @@ def simulate_trade(
                 break
 
     if exit_price is None:
-        exit_price = df_15m["close"].iloc[min(entry_idx + 99, len(df_15m) - 1)]
+        exit_price = df_15m["close"].iloc[
+            min(entry_idx + max_hold - 1, len(df_15m) - 1)
+        ]
         exit_reason = "TIMEOUT"
 
     # Calculate component pnl percentages
@@ -136,6 +139,7 @@ def run_backtest(df_1h, df_15m) -> BacktestResult:
 
     touch_th = 0.003
     sl_buffer = 0.0008
+    signal_cooldown_ms = 20 * 15 * 60 * 1000
     traded = set()
     trades = []
 
@@ -150,7 +154,12 @@ def run_backtest(df_1h, df_15m) -> BacktestResult:
         close = df_15m["close"].iloc[i]
         high = df_15m["high"].iloc[i]
         low = df_15m["low"].iloc[i]
-        key = (round(ch.support), round(ch.resistance), i // 20)
+        candle_time = int(df_15m["time"].iloc[i])
+        key = (
+            round(ch.support),
+            round(ch.resistance),
+            candle_time // signal_cooldown_ms,
+        )
         if key in traded:
             continue
 
@@ -161,17 +170,19 @@ def run_backtest(df_1h, df_15m) -> BacktestResult:
             sl = ch.support * (1 - sl_buffer)
             tp1 = mid
             tp2 = ch.resistance * 0.998
-            result = simulate_trade(df_15m, i, "LONG", entry, sl, tp1, tp2)
-            trades.append(result)
-            traded.add(key)
+            if entry > sl and tp1 > entry:
+                result = simulate_trade(df_15m, i, "LONG", entry, sl, tp1, tp2)
+                trades.append(result)
+                traded.add(key)
         elif high >= ch.resistance * (1 - touch_th) and close < ch.resistance:
             entry = close
             sl = ch.resistance * (1 + sl_buffer)
             tp1 = mid
             tp2 = ch.support * 1.002
-            result = simulate_trade(df_15m, i, "SHORT", entry, sl, tp1, tp2)
-            trades.append(result)
-            traded.add(key)
+            if sl > entry and entry > tp1:
+                result = simulate_trade(df_15m, i, "SHORT", entry, sl, tp1, tp2)
+                trades.append(result)
+                traded.add(key)
 
     if not trades:
         return BacktestResult(0, 0, 0, 0, 0, 0, 0, 10000)
