@@ -15,10 +15,15 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass, asdict, field
 from typing import List, Dict, Optional, Tuple
 import os
+import sys
 import time
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import urllib.parse
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from shared.channel_builder import build_channels as _build_htf_map
+from shared.channel_builder import Channel as SharedChannel
 
 # Paths
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -137,17 +142,7 @@ class StrategyState:
 class MLPaperTradingService:
     def __init__(self):
         self.running = False
-        # Evolving channels: key=(resistance_idx, support_idx) -> Channel
-        self.active_channels: Dict[tuple, Channel] = {}
-        self.current_channel: Optional[Channel] = None
-        self.previous_channel: Optional[Channel] = (
-            None  # Used for signal generation (matches backtest htf_idx-1)
-        )
         self.pending_fakeouts: Dict[str, dict] = {}
-        # Track last processed HTF index for channel updates
-        self.last_htf_idx: int = 0
-        self.all_swing_highs: List[dict] = []
-        self.all_swing_lows: List[dict] = []
 
         # Strategy (NO_ML only)
         self.strategies = {"NO_ML": StrategyState(name="No ML (All Signals)")}
@@ -1252,7 +1247,7 @@ class MLPaperTradingService:
         return None
 
     def _scan_for_signals(self):
-        """Scan for new trading signals."""
+        """Scan for new trading signals using stateless htf_map rebuild (matches backtest exactly)."""
         df_1h = self._load_candles(HTF, 1440)  # 60 days to match backtest
         df_15m = self._load_candles(LTF, 500)
 
@@ -1262,79 +1257,57 @@ class MLPaperTradingService:
             print(f"[SCAN] Not enough data (need 21+ 1h, 20+ 15m)")
             return
 
-        # Drop last (incomplete) HTF candle to match backtest behavior
-        # Backtest uses htf_idx - 1 to avoid lookahead bias from partial candles
+        # Drop last (incomplete) HTF candle
         df_1h_closed = df_1h.iloc[:-1].copy()
         current_htf_idx = len(df_1h_closed) - 1
-        print(
-            f"[SCAN] Using {len(df_1h_closed)} closed 1h candles for channel (dropped incomplete)"
+        print(f"[SCAN] Using {len(df_1h_closed)} closed 1h candles for channel")
+
+        # Stateless rebuild: build_channels from scratch every scan (matches backtest exactly)
+        htf_map = _build_htf_map(
+            df_1h_closed["high"].values,
+            df_1h_closed["low"].values,
+            df_1h_closed["close"].values,
         )
 
-        # Current price from latest 15m candle (for invalidation check)
-        current_price = df_15m["close"].iloc[-1]
+        # Use htf_map[current_htf_idx - 1] (matches backtest's htf_idx - 1)
+        channel = htf_map.get(current_htf_idx - 1)
 
-        # Initialize channels from historical data if empty (first run or after restart)
-        if not self.active_channels:
-            print(f"[CHANNEL] No active channels, initializing from historical data...")
-            self._initialize_channels(df_1h_closed)
-            # Initialize previous_channel from second-to-last iteration
-            self.previous_channel = self.current_channel
-
-        # Detect new HTF candle - shift current to previous (matches backtest htf_idx-1)
-        if current_htf_idx > self.last_htf_idx:
-            self.previous_channel = self.current_channel
-            self.last_htf_idx = current_htf_idx
-            print(
-                f"[CHANNEL] New HTF candle {current_htf_idx}, shifted channel to previous"
-            )
-
-        # Invalidate old channel if price moved too far (>3% away)
-        if hasattr(self, "current_channel") and self.current_channel:
-            ch = self.current_channel
-            if (
-                current_price < ch.support * 0.97
-                or current_price > ch.resistance * 1.03
-            ):
-                print(
-                    f"[CHANNEL] Price {current_price:.0f} out of range, invalidating old channel {ch.support:.0f}-{ch.resistance:.0f}"
-                )
-                self.current_channel = None
-                self.previous_channel = None
-
-        channel = self._update_channel(df_1h_closed)
+        htf_map_size = len(htf_map)
         if channel:
-            self.current_channel = channel
+            width_pct = (channel.resistance - channel.support) / channel.support * 100
             print(
-                f"[CHANNEL] Detected: {channel.support:.0f} - {channel.resistance:.0f} (touches: S={channel.support_touches}, R={channel.resistance_touches})"
+                f"[CHANNEL] htf_map has {htf_map_size} entries. Using idx {current_htf_idx - 1}: "
+                f"S={channel.support:.0f}({channel.support_touches}) R={channel.resistance:.0f}({channel.resistance_touches}) W={width_pct:.1f}%"
             )
-
-        # Use PREVIOUS channel for signal generation (matches backtest htf_idx-1)
-        if self.previous_channel is None:
-            print(f"[SCAN] No previous channel yet (waiting for 2nd HTF bar)")
+        else:
+            print(
+                f"[CHANNEL] htf_map has {htf_map_size} entries. No channel at idx {current_htf_idx - 1}"
+            )
+            # Still update trades even without a channel
+            current_close = df_15m["close"].iloc[-1]
+            current_high = df_15m["high"].iloc[-1]
+            current_low = df_15m["low"].iloc[-1]
+            self.last_price = current_close
+            self._update_trades(
+                current_close, current_high, current_low, df_15m, len(df_15m) - 1
+            )
             return
 
-        channel = self.previous_channel
         current_close = df_15m["close"].iloc[-1]
         current_high = df_15m["high"].iloc[-1]
         current_low = df_15m["low"].iloc[-1]
         current_candle_time = int(df_15m["time"].iloc[-1].timestamp() * 1000)
 
-        # Save current price for API
         self.last_price = current_close
 
-        # Update existing trades with current candle data
         self._update_trades(
             current_close, current_high, current_low, df_15m, len(df_15m) - 1
         )
 
-        # ===== CANDLE-CLOSE ENTRY (like backtest) =====
-        # Only check for new signals when a NEW candle starts
-        # This means the previous candle just completed
+        # Only check for new signals when a NEW 15m candle starts
         if current_candle_time == self.last_processed_candle_time:
-            # Same candle, skip signal detection
             return
 
-        # First scan after startup - just record current candle time, don't process signals
         if self.last_processed_candle_time == 0:
             print(
                 f"[SCAN] First scan - recording candle time, waiting for next candle close"
@@ -1342,12 +1315,10 @@ class MLPaperTradingService:
             self.last_processed_candle_time = current_candle_time
             return
 
-        # New candle detected - check the COMPLETED candle (index -2)
         if len(df_15m) < 3:
             self.last_processed_candle_time = current_candle_time
             return
 
-        # Use the completed candle (previous candle, index -2)
         completed_idx = len(df_15m) - 2
         completed_close = df_15m["close"].iloc[completed_idx]
         completed_high = df_15m["high"].iloc[completed_idx]
@@ -1360,29 +1331,25 @@ class MLPaperTradingService:
             f"[SCAN] New candle detected! Checking completed candle at {df_15m['time'].iloc[completed_idx]}"
         )
 
-        mid_price = (channel.resistance + channel.support) / 2
-
-        # CRITICAL: Validate channel width before generating signals
-        # This matches backtest's min_channel_width filter (narrow channels had 50% WR)
-        MIN_CHANNEL_WIDTH = 0.015  # 1.5%
         channel_width_pct = (channel.resistance - channel.support) / channel.support
-        if channel_width_pct < MIN_CHANNEL_WIDTH:
+        if channel_width_pct < 0.015:
             print(
-                f"[SCAN] Skipping signal - channel too narrow: {channel_width_pct * 100:.2f}% < {MIN_CHANNEL_WIDTH * 100:.1f}%"
+                f"[SCAN] Skipping signal - channel too narrow: {channel_width_pct * 100:.2f}%"
             )
             self.last_processed_candle_time = current_candle_time
             return
 
-        SIGNAL_COOLDOWN_MS = 20 * 15 * 60 * 1000  # 5 hours (matches backtest's i // 20)
+        mid_price = (channel.resistance + channel.support) / 2
+
+        SIGNAL_COOLDOWN_MS = 20 * 15 * 60 * 1000
         signal_key = f"{round(channel.support)}_{round(channel.resistance)}_{completed_candle_time // SIGNAL_COOLDOWN_MS}"
 
         if signal_key not in self.recent_signals:
-            # Support bounce → LONG (on completed candle)
             if (
                 completed_low <= channel.support * (1 + TOUCH_THRESHOLD)
                 and completed_close > channel.support
             ):
-                entry = completed_close  # Enter at completed candle's close
+                entry = completed_close
                 sl = channel.support * (1 - SL_BUFFER_PCT)
                 tp1 = mid_price
                 tp2 = channel.resistance * 0.998
@@ -1400,16 +1367,14 @@ class MLPaperTradingService:
                         channel_resistance=channel.resistance,
                         entry_prob=0.0,
                     )
-                    # Use completed candle time (entry at A's close, TP/SL check from B onwards)
                     self._process_signal(signal, completed_candle_time)
                     self.recent_signals.add(signal_key)
 
-            # Resistance bounce → SHORT (on completed candle)
             elif (
                 completed_high >= channel.resistance * (1 - TOUCH_THRESHOLD)
                 and completed_close < channel.resistance
             ):
-                entry = completed_close  # Enter at completed candle's close
+                entry = completed_close
                 sl = channel.resistance * (1 + SL_BUFFER_PCT)
                 tp1 = mid_price
                 tp2 = channel.support * 1.002
@@ -1427,14 +1392,11 @@ class MLPaperTradingService:
                         channel_resistance=channel.resistance,
                         entry_prob=0.0,
                     )
-                    # Use completed candle time (entry at A's close, TP/SL check from B onwards)
                     self._process_signal(signal, completed_candle_time)
                     self.recent_signals.add(signal_key)
 
-        # Update last processed candle time
         self.last_processed_candle_time = current_candle_time
 
-        # Clean old signal keys
         if len(self.recent_signals) > 100:
             self.recent_signals = set(list(self.recent_signals)[-50:])
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys
+import os
 import sqlite3
 import pandas as pd
 from datetime import datetime, timedelta
@@ -7,20 +8,16 @@ from dataclasses import dataclass
 from typing import Dict, List, Tuple
 from tqdm import tqdm
 
-DB_PATH = "/home/ubuntu/projects/CryptoFlow/server/data/cryptoflow.db"
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from shared.channel_builder import build_channels as _build_htf_map, Channel
 
-
-@dataclass
-class Channel:
-    support: float
-    resistance: float
-    support_idx: int = 0
-    resistance_idx: int = 0
-    lowest_low: float = 0
-    highest_high: float = 0
-    support_touches: int = 1
-    resistance_touches: int = 1
-    confirmed: bool = False
+DB_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..",
+    "server",
+    "data",
+    "cryptoflow.db",
+)
 
 
 @dataclass
@@ -52,139 +49,12 @@ def load_candles_from_db(timeframe: int, days: int = 60):
     return df
 
 
-def find_swing_points(candles, confirm_candles=3):
-    highs = candles["high"].values
-    lows = candles["low"].values
-    swing_highs, swing_lows = [], []
-
-    pot_high_idx, pot_high_price, since_high = 0, highs[0], 0
-    pot_low_idx, pot_low_price, since_low = 0, lows[0], 0
-
-    for i in range(1, len(candles)):
-        if highs[i] > pot_high_price:
-            pot_high_idx, pot_high_price, since_high = i, highs[i], 0
-        else:
-            since_high += 1
-            if since_high == confirm_candles:
-                swing_highs.append({"idx": pot_high_idx, "price": pot_high_price})
-
-        if lows[i] < pot_low_price:
-            pot_low_idx, pot_low_price, since_low = i, lows[i], 0
-        else:
-            since_low += 1
-            if since_low == confirm_candles:
-                swing_lows.append({"idx": pot_low_idx, "price": pot_low_price})
-
-        if since_high >= confirm_candles:
-            pot_high_price, pot_high_idx, since_high = highs[i], i, 0
-        if since_low >= confirm_candles:
-            pot_low_price, pot_low_idx, since_low = lows[i], i, 0
-
-    return swing_highs, swing_lows
-
-
 def build_channels(df_1h) -> Dict[int, Channel]:
-    max_w, min_w, touch_th = 0.05, 0.015, 0.004
-    swing_highs, swing_lows = find_swing_points(df_1h)
-    closes = df_1h["close"].values
-
-    active: Dict[tuple, Channel] = {}
-    htf_map: Dict[int, Channel] = {}
-
-    for idx in range(len(df_1h)):
-        close = closes[idx]
-        new_high = next((sh for sh in swing_highs if sh["idx"] + 3 == idx), None)
-        new_low = next((sl for sl in swing_lows if sl["idx"] + 3 == idx), None)
-        valid_lows = [sl for sl in swing_lows if sl["idx"] + 3 <= idx]
-        valid_highs = [sh for sh in swing_highs if sh["idx"] + 3 <= idx]
-
-        if new_high:
-            for sl in valid_lows[-30:]:
-                if sl["idx"] < new_high["idx"] - 100:
-                    continue
-                if new_high["price"] > sl["price"]:
-                    w = (new_high["price"] - sl["price"]) / sl["price"]
-                    if min_w <= w <= max_w:
-                        key = (new_high["idx"], sl["idx"])
-                        if key not in active:
-                            active[key] = Channel(
-                                support=sl["price"],
-                                resistance=new_high["price"],
-                                support_idx=sl["idx"],
-                                resistance_idx=new_high["idx"],
-                                lowest_low=sl["price"],
-                                highest_high=new_high["price"],
-                            )
-
-        if new_low:
-            for sh in valid_highs[-30:]:
-                if sh["idx"] < new_low["idx"] - 100:
-                    continue
-                if sh["price"] > new_low["price"]:
-                    w = (sh["price"] - new_low["price"]) / new_low["price"]
-                    if min_w <= w <= max_w:
-                        key = (sh["idx"], new_low["idx"])
-                        if key not in active:
-                            active[key] = Channel(
-                                support=new_low["price"],
-                                resistance=sh["price"],
-                                support_idx=new_low["idx"],
-                                resistance_idx=sh["idx"],
-                                lowest_low=new_low["price"],
-                                highest_high=sh["price"],
-                            )
-
-        to_remove = []
-        for key, ch in active.items():
-            if close < ch.lowest_low * 0.96 or close > ch.highest_high * 1.04:
-                to_remove.append(key)
-                continue
-
-            if new_low and new_low["price"] < ch.resistance:
-                if new_low["price"] < ch.lowest_low:
-                    ch.lowest_low = ch.support = new_low["price"]
-                    ch.support_touches = 1
-                elif ch.lowest_low < new_low["price"] < ch.support:
-                    ch.support = new_low["price"]
-                    ch.support_touches += 1
-                elif abs(new_low["price"] - ch.support) / ch.support < touch_th:
-                    ch.support_touches += 1
-
-            if new_high and new_high["price"] > ch.support:
-                if new_high["price"] > ch.highest_high:
-                    ch.highest_high = ch.resistance = new_high["price"]
-                    ch.resistance_touches = 1
-                elif ch.resistance < new_high["price"] < ch.highest_high:
-                    ch.resistance = new_high["price"]
-                    ch.resistance_touches += 1
-                elif abs(new_high["price"] - ch.resistance) / ch.resistance < touch_th:
-                    ch.resistance_touches += 1
-
-            if ch.support_touches >= 2 and ch.resistance_touches >= 2:
-                ch.confirmed = True
-            w = (ch.resistance - ch.support) / ch.support
-            if not (min_w <= w <= max_w):
-                to_remove.append(key)
-
-        for key in to_remove:
-            del active[key]
-
-        candidates = [
-            (
-                ch.support_touches + ch.resistance_touches,
-                (ch.resistance - ch.support) / ch.support,
-                ch,
-            )
-            for ch in active.values()
-            if ch.confirmed and ch.support * 0.98 <= close <= ch.resistance * 1.02
-        ]
-
-        if candidates:
-            max_score = max(c[0] for c in candidates)
-            top = [c for c in candidates if c[0] == max_score]
-            htf_map[idx] = min(top, key=lambda c: c[1])[2]
-
-    return htf_map
+    return _build_htf_map(
+        df_1h["high"].values,
+        df_1h["low"].values,
+        df_1h["close"].values,
+    )
 
 
 def simulate_trade(
