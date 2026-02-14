@@ -1273,6 +1273,7 @@ class MLPaperTradingService:
 
         # Use htf_map[current_htf_idx - 1] (matches backtest's htf_idx - 1)
         channel = htf_map.get(current_htf_idx - 1)
+        self.current_channel = channel
 
         htf_map_size = len(htf_map)
         if channel:
