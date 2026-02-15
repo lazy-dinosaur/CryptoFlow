@@ -137,6 +137,12 @@ def simulate_trade(
 def run_backtest(df_1h, df_15m) -> BacktestResult:
     htf_map = build_channels(df_1h)
 
+    one_hour_ms = 3600000
+    htf_time_to_idx = {}
+    for idx in range(len(df_1h)):
+        t = int(df_1h["time"].iloc[idx])
+        htf_time_to_idx[t] = idx
+
     touch_th = 0.003
     sl_buffer = 0.0008
     signal_cooldown_ms = 20 * 15 * 60 * 1000
@@ -144,7 +150,11 @@ def run_backtest(df_1h, df_15m) -> BacktestResult:
     trades = []
 
     for i in tqdm(range(len(df_15m)), desc="Backtesting"):
-        htf_idx = i // 4
+        candle_time_ms = int(df_15m["time"].iloc[i])
+        htf_time = (candle_time_ms // one_hour_ms) * one_hour_ms
+        htf_idx = htf_time_to_idx.get(htf_time)
+        if htf_idx is None:
+            continue
         ch = htf_map.get(htf_idx - 1)
         if not ch:
             continue
