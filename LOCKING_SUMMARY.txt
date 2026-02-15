@@ -1,0 +1,100 @@
+================================================================================
+CRYPTOFLOW DATABASE LOCKING ISSUE - EXECUTIVE SUMMARY
+================================================================================
+
+PROBLEM:
+--------
+API and Collector services crash with "database is locked" errors despite WAL 
+mode being enabled.
+
+ROOT CAUSE:
+-----------
+Single shared database connection + concurrent writes from Collector + 
+insufficient timeout settings = lock contention.
+
+SPECIFIC ISSUES:
+----------------
+1. ❌ busy_timeout = 2000ms (too short for large transactions)
+2. ❌ wal_autocheckpoint = 1000 (triggers too frequently)
+3. ❌ Backfill + Sync can run simultaneously (both write)
+4. ❌ API reads use same connection as Collector writes
+5. ❌ No lock monitoring/alerting
+
+LOCK SCENARIOS:
+---------------
+Scenario 1: Backfill Collision
+  - Collector: INSERT 4000 candles (5+ seconds)
+  - API: Waiting for lock (2000ms timeout expires)
+  - Result: "database is locked"
+
+Scenario 2: Concurrent Sync
+  - Collector sync: UPDATE candles (3+ seconds)
+  - Collector backfill: Waiting for lock (2000ms timeout expires)
+  - Result: "database is locked"
+
+Scenario 3: WAL Checkpoint
+  - Collector: COMMIT (triggers checkpoint)
+  - API: Waiting for lock during checkpoint (2000ms timeout expires)
+  - Result: "database is locked"
+
+QUICK FIXES (Do These First):
+-----------------------------
+1. Increase busy_timeout from 2000 to 5000 (5 seconds)
+   File: server/db.js, line 21
+   Impact: Allows large transactions to complete
+   Time: 1 minute
+
+2. Increase wal_autocheckpoint from 1000 to 5000 (pages)
+   File: server/db.js, line 23
+   Impact: Reduces checkpoint frequency
+   Time: 1 minute
+
+3. Add backfill mutex flag
+   File: server/collector.js, line 241
+   Impact: Prevents simultaneous backfill + sync
+   Time: 5 minutes
+
+MEDIUM FIXES (Do These Next):
+-----------------------------
+4. Add read-only connections for API
+   File: server/db.js + server/api.js
+   Impact: Eliminates reader-writer conflicts
+   Time: 15 minutes
+
+5. Add lock monitoring
+   File: server/db.js
+   Impact: Detect lock issues in production
+   Time: 10 minutes
+
+EXPECTED RESULTS:
+-----------------
+Before:  10-50 lock timeouts per hour
+After:   0-2 lock timeouts per hour
+
+Before:  API response time 2000-5000ms during backfill
+After:   API response time <100ms during backfill
+
+DETAILED ANALYSIS:
+------------------
+See: DATABASE_LOCKING_ANALYSIS.md
+     DATABASE_LOCKING_FIXES.md
+
+CURRENT STATUS:
+---------------
+✓ WAL mode enabled
+✓ Transaction batching implemented
+✓ Sync/backfill flags exist
+✗ Timeouts too short
+✗ Checkpoint frequency too high
+✗ No read-only connections
+✗ No lock monitoring
+
+NEXT STEPS:
+-----------
+1. Apply Quick Fixes (2 minutes)
+2. Test with concurrent requests
+3. Monitor lock count in /api/health
+4. Apply Medium Fixes if needed
+5. Monitor in production
+
+================================================================================

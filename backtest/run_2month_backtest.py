@@ -34,16 +34,20 @@ class BacktestResult:
 
 def load_candles_from_db(timeframe: int, days: int = 60):
     conn = sqlite3.connect(DB_PATH)
-    end_ts = int(datetime.now().timestamp() * 1000)
-    start_ts = end_ts - (days * 24 * 60 * 60 * 1000)
+    candles_per_day = 24 * 60 // timeframe
+    limit = days * candles_per_day
 
     query = f"""
         SELECT time, open, high, low, close, volume, delta
-        FROM candles_{timeframe}
-        WHERE symbol = 'BINANCE:BTCUSDT' AND time >= ? AND time <= ?
-        ORDER BY time
+        FROM (
+            SELECT time, open, high, low, close, volume, delta
+            FROM candles_{timeframe}
+            WHERE symbol = 'BINANCE:BTCUSDT'
+            ORDER BY time DESC
+            LIMIT ?
+        ) sub ORDER BY time
     """
-    df = pd.read_sql_query(query, conn, params=[start_ts, end_ts])
+    df = pd.read_sql_query(query, conn, params=[limit])
     conn.close()
     df["datetime"] = pd.to_datetime(df["time"], unit="ms")
     return df

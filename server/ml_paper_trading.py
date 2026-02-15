@@ -504,6 +504,7 @@ class MLPaperTradingService:
         if len(df) == 0:
             return pd.DataFrame()
 
+        df["time_ms"] = df["time"].astype(int)
         df["time"] = pd.to_datetime(df["time"], unit="ms")
         df = df.sort_values("time").reset_index(drop=True)
         return df
@@ -563,7 +564,7 @@ class MLPaperTradingService:
         # Get current 15m candle time for lookahead bias prevention
         current_candle_time = 0
         if df_15m is not None and len(df_15m) > 0:
-            current_candle_time = int(df_15m["time"].iloc[-1].timestamp() * 1000)
+            current_candle_time = int(df_15m["time_ms"].iloc[-1])
 
         for strategy_name, state in self.strategies.items():
             trades_to_remove = []
@@ -1299,7 +1300,7 @@ class MLPaperTradingService:
         current_close = df_15m["close"].iloc[-1]
         current_high = df_15m["high"].iloc[-1]
         current_low = df_15m["low"].iloc[-1]
-        current_candle_time = int(df_15m["time"].iloc[-1].timestamp() * 1000)
+        current_candle_time = int(df_15m["time_ms"].iloc[-1])
 
         self.last_price = current_close
 
@@ -1307,7 +1308,6 @@ class MLPaperTradingService:
             current_close, current_high, current_low, df_15m, len(df_15m) - 1
         )
 
-        # Only check for new signals when a NEW 15m candle starts
         if current_candle_time == self.last_processed_candle_time:
             return
 
@@ -1326,9 +1326,7 @@ class MLPaperTradingService:
         completed_close = df_15m["close"].iloc[completed_idx]
         completed_high = df_15m["high"].iloc[completed_idx]
         completed_low = df_15m["low"].iloc[completed_idx]
-        completed_candle_time = int(
-            df_15m["time"].iloc[completed_idx].timestamp() * 1000
-        )
+        completed_candle_time = int(df_15m["time_ms"].iloc[completed_idx])
 
         print(
             f"[SCAN] New candle detected! Checking completed candle at {df_15m['time'].iloc[completed_idx]}"
